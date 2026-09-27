@@ -26,6 +26,14 @@ assert u.parse_ref("nginx@sha256:abc") is None
 assert u.label_schedule("true") == ("daily", True) and u.label_schedule("") == ("daily", True)
 assert u.label_schedule("*/5 * * * *") == ("*/5 * * * *", True)
 assert u.label_schedule("false")[1] is False
+# notification payloads
+h, b = u.notify_request("https://discord.com/api/webhooks/1/abc", "t", "nginx:1 -> 2")
+assert h["Content-Type"] == "application/json" and json.loads(b) == {"content": "**t**\n```\nnginx:1 -> 2\n```", "allowed_mentions": {"parse": []}}
+assert u.notify_request("https://ptb.discordapp.com/api/webhooks/1/abc", "t", "x")[0]["Content-Type"] == "application/json"
+assert len(json.loads(u.notify_request("https://discord.com/api/webhooks/1/a", "t", "x" * 5000)[1])["content"]) <= 2000
+h, b = u.notify_request("https://ntfy.sh/topic", "t", "body")
+assert h["Title"] == "t" and h["Content-Type"] == "text/plain" and b == b"body"
+assert u.notify_request("https://example.com/?next=https://discord.com/api/webhooks/1/a", "t", "x")[0]["Content-Type"] == "text/plain"
 print("unit ok")
 
 restarts=[]

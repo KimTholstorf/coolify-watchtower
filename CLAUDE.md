@@ -10,7 +10,8 @@ A Coolify-native replacement for Watchtower in a homelab running Coolify v4. Coo
    - evaluates each task's cron against the current minute, in `TZ`
    - for due services, finds their running containers through the read-only Docker API and compares each image's local `RepoDigests` with the registry's `Docker-Content-Digest` (manifest HEAD request, anonymous bearer token flow)
    - calls `POST /api/v1/services/{uuid}/restart?latest=true` only if a digest changed, falling back to GET on 405 for Coolify < 4.2.0
-3. At startup it prints a table of all opted-in services and runs a report-only check, which never restarts anything.
+3. Notifications go to `NOTIFY_URL`. A Discord webhook URL gets a JSON body (`content`, mentions disabled, max 2000 chars); anything else gets a plain-text POST with a `Title` header (ntfy style). Requests send a custom User-Agent, because Cloudflare in front of Discord blocks urllib's default one (error 1010). Coolify's API has no send endpoint: `/notifications/discord` only reads and changes settings, and reading the webhook URL needs `read:sensitive`, so we don't use it.
+4. At startup it prints a table of all opted-in services and runs a report-only check, which never restarts anything.
 
 ## Distribution
 The repo goes on GitHub (`KimTholstorf/coolify-watchtower`). CI builds a multi-arch image to `ghcr.io/kimtholstorf/coolify-watchtower`, which people pull through a compose file. Until then, people deploy from the repo through Coolify's GitHub App source, which builds it. Later goal: get it into Coolify's one-click service catalogue, whose templates reference a published image, so `docker-compose.yml` should stay usable without the repo.

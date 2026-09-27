@@ -92,11 +92,31 @@ def http(method, url, headers=None, data=None, timeout=20):
         return e.code, e.headers, e.read()
 
 
+DISCORD_WEBHOOK = re.compile(r"https://([a-z]+\.)?discord(app)?\.com/api/webhooks/")
+
+
+def notify_request(url, title, body):
+    """Headers and payload for NOTIFY_URL: JSON for a Discord webhook, plain text otherwise (ntfy style)."""
+    # Discord sits behind Cloudflare, which rejects urllib's default User-Agent.
+    headers = {"User-Agent": f"coolify-watchtower/{VERSION}"}
+    if DISCORD_WEBHOOK.match(url):
+        content = f"**{title}**\n```\n{body}\n```"
+        if len(content) > 2000:  # Discord's message limit
+            content = content[:1990] + "\n...```"
+        headers["Content-Type"] = "application/json"
+        return headers, json.dumps({"content": content, "allowed_mentions": {"parse": []}}).encode()
+    headers.update({"Title": title, "Content-Type": "text/plain"})
+    return headers, body.encode()
+
+
 def notify(title, body):
     if not NOTIFY_URL:
         return
     try:
-        http("POST", NOTIFY_URL, {"Title": title, "Content-Type": "text/plain"}, body.encode())
+        headers, data = notify_request(NOTIFY_URL, title, body)
+        st, _, resp = http("POST", NOTIFY_URL, headers, data)
+        if st >= 300:
+            log(f"WARN notify HTTP {st}: {resp[:200]!r}")
     except Exception as e:
         log(f"WARN notify failed: {e}")
 
