@@ -26,7 +26,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.1.0"
+VERSION = "1.3.0"
 
 
 def env_bool(name, default):
@@ -42,7 +42,8 @@ DEFAULT_SCHEDULE = os.environ.get("DEFAULT_SCHEDULE", "daily").strip()
 DRY_RUN = env_bool("DRY_RUN", "true")
 REPORT_ON_START = env_bool("REPORT_ON_START", "true")
 NOTIFY_URL = os.environ.get("NOTIFY_URL", "").strip()
-TZ_NAME = os.environ.get("TZ", "UTC")
+# Empty TZ: each service follows its server's timezone from Coolify (Servers -> General).
+TZ_OVERRIDE = os.environ.get("TZ", "").strip()
 
 ACCEPT_MANIFESTS = ", ".join([
     "application/vnd.oci.image.index.v1+json",
@@ -65,22 +66,35 @@ CRON_ALIASES = {
 
 # ---------------------------------------------------------------- utilities
 
+_zones = {}
+_warned = set()
+
+
+def zone(name):
+    """ZoneInfo for a timezone name. Empty or unknown names fall back to UTC (warned once)."""
+    name = (name or "").strip() or "UTC"
+    if name not in _zones:
+        try:
+            _zones[name] = ZoneInfo(name) if ZoneInfo else timezone.utc
+        except Exception:
+            print(f"WARN unknown timezone '{name}', using UTC", flush=True)
+            _zones[name] = timezone.utc
+    return _zones[name]
+
+
+# Log timestamps: TZ if set, else the server's timezone when all servers agree, else UTC.
+LOG_TZ = zone(TZ_OVERRIDE)
+
+
 def log(msg):
-    stamp = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+    stamp = datetime.now(LOG_TZ).strftime("%Y-%m-%d %H:%M:%S")
     print(f"{stamp} {msg}", flush=True)
 
 
-def load_tz():
-    if ZoneInfo is None:
-        return timezone.utc
-    try:
-        return ZoneInfo(TZ_NAME)
-    except Exception:
-        print(f"WARN unknown timezone '{TZ_NAME}' (mount /usr/share/zoneinfo?), using UTC", flush=True)
-        return timezone.utc
-
-
-TZ = load_tz()
+def warn_once(key, msg):
+    if key not in _warned:
+        _warned.add(key)
+        log(f"WARN {msg}")
 
 
 def http(method, url, headers=None, data=None, timeout=20):
@@ -175,8 +189,8 @@ def coolify(method, path):
     })
     try:
         data = json.loads(body) if body else None
-    except ValueError:
-        data = None
+    except ValueError:  # e.g. /version answers with plain text
+        data = body.decode(errors="replace").strip() or None
     return st, data
 
 
@@ -190,16 +204,44 @@ def label_schedule(value):
     return v, True
 
 
+def server_timezones():
+    """{server_id: timezone name} from Coolify's server settings, or None if unavailable."""
+    st, servers = coolify("GET", "/servers")
+    if st != 200 or not isinstance(servers, list):
+        return None
+    result = {}
+    for s in servers:
+        settings = s.get("settings") or {}
+        if settings.get("server_id") is not None:
+            result[settings["server_id"]] = settings.get("server_timezone") or "UTC"
+    return result
+
+
 def discover():
-    """Return ({service_uuid: {name, frequency, enabled, source}}, [ignored container names]).
+    """Return ({service_uuid: {name, frequency, enabled, source, timezone}}, [ignored container names]).
 
     Opt-in is a scheduled task named TASK_NAME or a container carrying AUTO_UPDATE_LABEL.
-    The task wins over the label. Labelled containers outside any service are ignored."""
+    The task wins over the label. Labelled containers outside any service are ignored.
+    Schedules use TZ if set, else the timezone of the server the service runs on."""
+    global LOG_TZ
     st, services = coolify("GET", "/services")
     if st != 200 or not isinstance(services, list):
         log(f"ERROR listing services: HTTP {st} {services}")
         return None
     names = {s["uuid"]: s.get("name") or s["uuid"] for s in services if s.get("uuid")}
+    server_of = {s["uuid"]: s.get("server_id") for s in services if s.get("uuid")}
+
+    tzs = {}
+    if not TZ_OVERRIDE:
+        tzs = server_timezones()
+        if tzs is None:
+            warn_once("servers", "cannot read server timezones from Coolify (GET /servers) - using UTC")
+            tzs = {}
+        LOG_TZ = zone(next(iter(set(tzs.values()))) if len(set(tzs.values())) == 1 else "UTC")
+
+    def tz_for(uuid):
+        return TZ_OVERRIDE or tzs.get(server_of.get(uuid)) or "UTC"
+
     found = {}
     for uuid, name in names.items():
         st, tasks = coolify("GET", f"/services/{uuid}/scheduled-tasks")
@@ -212,6 +254,7 @@ def discover():
                     "frequency": t.get("frequency") or "",
                     "enabled": bool(t.get("enabled", True)),
                     "source": "task",
+                    "timezone": tz_for(uuid),
                 }
 
     ignored = []
@@ -232,7 +275,8 @@ def discover():
             if uuid in found:
                 continue
             frequency, enabled = label_schedule(labels[AUTO_UPDATE_LABEL])
-            found[uuid] = {"name": names[uuid], "frequency": frequency, "enabled": enabled, "source": "label"}
+            found[uuid] = {"name": names[uuid], "frequency": frequency, "enabled": enabled, "source": "label",
+                           "timezone": tz_for(uuid)}
     return found, sorted(ignored)
 
 
@@ -405,10 +449,12 @@ def print_table(found, ignored):
     width = max(len(v["name"]) for v in found.values())
     for uuid, v in sorted(found.items(), key=lambda kv: kv[1]["name"].lower()):
         state = "enabled " if v["enabled"] else "DISABLED"
-        print(f"    {v['name'].ljust(width)}  {state}  {v['source']:<5}  {v['frequency']:<14}  {uuid}", flush=True)
+        print(f"    {v['name'].ljust(width)}  {state}  {v['source']:<5}  {v['frequency']:<14}  "
+              f"{v['timezone']:<18}  {uuid}", flush=True)
 
 
 def tick(now, state):
+    """Run one minute. `now` must be timezone-aware; each schedule is evaluated in its own timezone."""
     result = discover()
     if result is None:
         return
@@ -421,7 +467,7 @@ def tick(now, state):
         if not cfg["enabled"]:
             continue
         try:
-            due = cron_match(cfg["frequency"], now)
+            due = cron_match(cfg["frequency"], now.astimezone(zone(cfg["timezone"])))
         except ValueError as e:
             key = (uuid, cfg["frequency"])
             if key not in state.setdefault("bad", set()):
@@ -429,13 +475,13 @@ def tick(now, state):
                 log(f"[{cfg['name']}] WARN {e} - ignored")
             continue
         if due:
-            log(f"[{cfg['name']}] schedule '{cfg['frequency']}' due - checking")
+            log(f"[{cfg['name']}] schedule '{cfg['frequency']}' ({cfg['timezone']}) due - checking")
             check_service(uuid, cfg, allow_restart=True)
 
 
 def main():
     log(f"coolify-watchtower {VERSION} | coolify={COOLIFY_URL} docker={DOCKER_URL} "
-        f"task='{TASK_NAME}' label='{AUTO_UPDATE_LABEL}' tz={TZ_NAME} dry_run={DRY_RUN}")
+        f"task='{TASK_NAME}' label='{AUTO_UPDATE_LABEL}' tz={TZ_OVERRIDE or 'from Coolify servers'} dry_run={DRY_RUN}")
     if not COOLIFY_TOKEN:
         log("ERROR COOLIFY_TOKEN is not set")
         raise SystemExit(1)
@@ -467,7 +513,7 @@ def main():
 
     last = None
     while True:
-        now = datetime.now(TZ).replace(second=0, microsecond=0)
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
         if now != last:
             last = now
             try:

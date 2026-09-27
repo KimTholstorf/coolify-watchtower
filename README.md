@@ -19,14 +19,14 @@ You can follow what happens in several places:
 
 ## Setup
 
-1. Create an API token under Keys & Tokens → API tokens, with `read` and `deploy`. If restart returns 403, add `write`.
+1. Enable API access in Coolify's settings, then create an API token under Keys & Tokens → API tokens with `read` and `deploy`. A `read` token is enough while `DRY_RUN` is on. If restart returns 403, add `write`. If you restrict Allowed API IPs, include the subnet of the `coolify` Docker network (`docker network inspect coolify`).
 2. Deploy it in one of two ways:
    - From this GitHub repo, so Coolify builds the image: connect GitHub through Coolify's [GitHub App source](https://coolify.io/docs/applications/sources/github/app), create a resource from this repo, choose the Docker Compose build pack and set Docker Compose Location to `/docker-compose.build.yml`.
    - From the prebuilt image: + New Resource → Docker Compose (empty), then paste `docker-compose.yml`. It pulls `ghcr.io/kimtholstorf/coolify-watchtower:latest`.
 3. Set the environment variables:
    - `COOLIFY_TOKEN`: the token.
-   - `COOLIFY_URL`: defaults to `http://coolify:8080`, which only works with Connect to Predefined Network enabled on this resource. Otherwise use your dashboard URL.
-   - `TZ`: use the same timezone as the server in Coolify (Server → General), so checks run at the same time Coolify runs the task.
+   - `COOLIFY_URL`: defaults to `http://coolify:8080`. The compose file connects the updater (and only the updater) to Coolify's `coolify` network, so leave Connect to Predefined Network off. That setting would also put the socket proxy on the shared network, where any container could read other containers' environment variables through it.
+   - `TZ` (optional): leave it empty. The updater then reads each server's Server Timezone from Coolify (Servers → General) and evaluates schedules in it, just like Coolify does when it runs the task. Setting `TZ` forces one timezone for every service.
    - `DRY_RUN`: `true` by default. Set it to `false` once the logs look right.
    - `AUTO_UPDATE_LABEL` and `DEFAULT_SCHEDULE` (optional): the label name (default `coolify.auto-update`) and the schedule used when the label's value is `true` (default `daily`).
    - `NOTIFY_URL` (optional): where to send a message when an update is queued, fails, or would run in dry-run mode. This can be a Discord webhook URL (`https://discord.com/api/webhooks/...`), an ntfy topic URL, or any endpoint that accepts a plain-text POST. Coolify's API can't send messages to the Discord channel you set up in Coolify, but you can create a second webhook in the same channel under Channel settings → Integrations → Webhooks and use its URL here.

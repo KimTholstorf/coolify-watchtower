@@ -43,11 +43,13 @@ class H(BaseHTTPRequestHandler):
         b=json.dumps(obj).encode(); self.send_response(code); self.send_header("Content-Type","application/json"); self.end_headers(); self.wfile.write(b)
     def do_GET(self):
         p=self.path
-        if p=="/api/v1/version": return self.send("4.2.1")
-        if p=="/api/v1/services": return self.send([{"uuid":"svc1","name":"uptime-kuma"},{"uuid":"svc2","name":"pocket-id"},{"uuid":"svc3","name":"vaultwarden"},{"uuid":"svc4","name":"gotify"}])
+        if p=="/api/v1/version":  # real Coolify answers with plain text, not JSON
+            self.send_response(200); self.send_header("Content-Type","text/html"); self.end_headers(); return self.wfile.write(b"4.2.1")
+        if p=="/api/v1/services": return self.send([{"uuid":"svc1","name":"uptime-kuma","server_id":0},{"uuid":"svc2","name":"pocket-id","server_id":0},{"uuid":"svc3","name":"vaultwarden","server_id":1},{"uuid":"svc4","name":"gotify","server_id":0}])
         if p=="/api/v1/services/svc1/scheduled-tasks": return self.send([{"name":"auto-update","frequency":"30 4 * * *","enabled":True}])
         if p=="/api/v1/services/svc2/scheduled-tasks": return self.send([{"name":"Auto-Update","frequency":"daily","enabled":False}])
         if p in ("/api/v1/services/svc3/scheduled-tasks","/api/v1/services/svc4/scheduled-tasks"): return self.send([])
+        if p=="/api/v1/servers": return self.send([{"name":"localhost","settings":{"server_id":0,"server_timezone":"Europe/Copenhagen"}},{"name":"remote","settings":{"server_id":1,"server_timezone":"America/New_York"}}])
         if p=="/api/v1/applications": return self.send([{"uuid":"app1","name":"myapp"}])
         if p=="/api/v1/applications/app1/scheduled-tasks": return self.send([{"name":"auto-update","frequency":"daily"}])
         if p=="/version": return self.send({"Version":"28"})
@@ -68,13 +70,27 @@ u.remote_digest = lambda *a: "sha256:bbbbbbbbbbbbbbbbbb"
 st={}
 found, ignored = u.discover()
 assert found["svc1"]["source"]=="task" and found["svc1"]["enabled"]  # task wins over label=false
-assert found["svc3"]=={"name":"vaultwarden","frequency":"*/5 * * * *","enabled":True,"source":"label"}
+assert found["svc3"]=={"name":"vaultwarden","frequency":"*/5 * * * *","enabled":True,"source":"label","timezone":"Europe/Copenhagen"}  # TZ override
 assert found["svc4"]["frequency"]=="daily" and "svc2" in found
 assert ignored==["myapp-app1"]
-u.tick(datetime(2026,9,27,4,30), st)  # svc1 task + svc3 label due; svc4 (daily) not
+CPH = u.zone("Europe/Copenhagen")
+u.tick(datetime(2026,9,27,4,30,tzinfo=CPH), st)  # svc1 task + svc3 label due; svc4 (daily) not
 print("restarts:", restarts)
 assert sorted(restarts)==["/api/v1/services/svc1/restart?latest=true","/api/v1/services/svc3/restart?latest=true"]
-u.tick(datetime(2026,9,27,4,31), st)
+u.tick(datetime(2026,9,27,4,31,tzinfo=CPH), st)
 assert len(restarts)==2
+assert u.coolify("GET", "/version") == (200, "4.2.1")
+# TZ unset: each service follows its server's timezone from Coolify.
+u.TZ_OVERRIDE = ""
+found, _ = u.discover()
+assert found["svc1"]["timezone"]=="Europe/Copenhagen" and found["svc3"]["timezone"]=="America/New_York"
+assert u.LOG_TZ is u.zone("UTC")  # servers disagree -> UTC log stamps
+UTC = u.zone("UTC")
+restarts.clear()
+u.tick(datetime(2026,9,27,2,30,tzinfo=UTC), {})  # 04:30 in Copenhagen: svc1 due
+assert "/api/v1/services/svc1/restart?latest=true" in restarts
+restarts.clear()
+u.tick(datetime(2026,9,27,4,30,tzinfo=UTC), {})  # 06:30 in Copenhagen: svc1 not due
+assert "/api/v1/services/svc1/restart?latest=true" not in restarts
 print("apps:", u.discover_unsupported_apps())
 print("harness ok")

@@ -2,6 +2,8 @@
 # Coolify: deploy the GitHub repo with the Docker Compose build pack and
 # Docker Compose Location /docker-compose.build.yml.
 # Set COOLIFY_TOKEN in the Environment Variables tab. Starts in DRY_RUN=true.
+# Leave "Connect to Predefined Network" OFF: only the updater joins the coolify network,
+# so other containers there can't reach the socket proxy (which exposes container env vars).
 services:
   updater:
     build: .
@@ -9,13 +11,16 @@ services:
       - COOLIFY_URL=${COOLIFY_URL:-http://coolify:8080}
       - COOLIFY_TOKEN=${COOLIFY_TOKEN}
       - DRY_RUN=${DRY_RUN:-true}
-      - TZ=${TZ:-UTC}
+      - TZ=${TZ:-}
       - TASK_NAME=${TASK_NAME:-auto-update}
       - AUTO_UPDATE_LABEL=${AUTO_UPDATE_LABEL:-coolify.auto-update}
       - DEFAULT_SCHEDULE=${DEFAULT_SCHEDULE:-daily}
       - REPORT_ON_START=${REPORT_ON_START:-true}
       - NOTIFY_URL=${NOTIFY_URL:-}
       - DOCKER_HOST=tcp://socket-proxy:2375
+    networks:
+      - default
+      - coolify
     depends_on:
       - socket-proxy
     restart: unless-stopped
@@ -28,4 +33,10 @@ services:
       - POST=0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - default
     restart: unless-stopped
+
+networks:
+  coolify:
+    external: true

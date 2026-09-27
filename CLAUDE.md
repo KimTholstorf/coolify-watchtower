@@ -7,7 +7,7 @@ A Coolify-native replacement for Watchtower in a homelab running Coolify v4. Coo
    **Alternative opt-in:** a container label `coolify.auto-update` (env `AUTO_UPDATE_LABEL`) on any container of the service, set in the service's compose file next to Coolify's own `coolify.managed` / `coolify.serviceId` labels. Its value is the schedule (cron or alias). `true` or empty means `DEFAULT_SCHEDULE` (default `daily`), and `false`/`no`/`off`/`0` pauses. The label opts in the whole service, because restart is service-wide. If a service has both, the task wins. Labels on containers that don't belong to a service (e.g. applications) are logged as ignored.
 2. `updater.py` runs as a central Coolify resource (compose: `updater` + `socket-proxy`). Every minute it:
    - calls `GET /api/v1/services` and `GET /api/v1/services/{uuid}/scheduled-tasks` to find `auto-update` tasks, and lists running containers to find `coolify.auto-update` labels
-   - evaluates each task's cron against the current minute, in `TZ`
+   - evaluates each task's cron against the current minute in the timezone of the server the service runs on (`GET /servers` → `settings.server_timezone`, matched through the service's `server_id`), or in `TZ` if set. Log timestamps use `TZ`, or the server timezone when all servers agree, else UTC
    - for due services, finds their running containers through the read-only Docker API and compares each image's local `RepoDigests` with the registry's `Docker-Content-Digest` (manifest HEAD request, anonymous bearer token flow)
    - calls `POST /api/v1/services/{uuid}/restart?latest=true` only if a digest changed, falling back to GET on 405 for Coolify < 4.2.0
 3. Notifications go to `NOTIFY_URL`. A Discord webhook URL gets a JSON body (`content`, mentions disabled, max 2000 chars); anything else gets a plain-text POST with a `Title` header (ntfy style). Requests send a custom User-Agent, because Cloudflare in front of Discord blocks urllib's default one (error 1010). Coolify's API has no send endpoint: `/notifications/discord` only reads and changes settings, and reading the webhook URL needs `read:sensitive`, so we don't use it.
@@ -29,6 +29,7 @@ The repo goes on GitHub (`KimTholstorf/coolify-watchtower`). CI builds a multi-a
 ## Hard constraints (deliberate, do not "fix")
 - **Standard library only.** No dependencies, so the image is just `python:3.13-alpine` plus `tzdata`.
 - **Docker access is read-only.** It goes through `tecnativa/docker-socket-proxy` with `CONTAINERS=1 IMAGES=1 POST=0`. The updater must never write to Docker; all changes go through the Coolify API.
+- **Only the updater joins the `coolify` network** (external network in the compose files); the socket proxy stays on the stack's private network. Read-only access still exposes every container's env vars, so the proxy must not be reachable from other stacks. Never tell users to enable Connect to Predefined Network, which would attach both services.
 - **`DRY_RUN` defaults to true.**
 - The per-service task runs `true` inside a container of that service, so the chosen container needs a shell. Failures show up in Coolify under Settings → Scheduled Jobs → Failures.
 
@@ -47,18 +48,19 @@ The repo goes on GitHub (`KimTholstorf/coolify-watchtower`). CI builds a multi-a
 - Coolify's Docker Compose build pack builds `docker-compose.build.yml` from the GitHub repo as expected.
 
 ## Status
-v1 is published as `ghcr.io/kimtholstorf/coolify-watchtower` but hasn't run against a real Coolify yet.
+v1 is published as `ghcr.io/kimtholstorf/coolify-watchtower` and starts cleanly on a real Coolify in dry-run mode. No service has been opted in yet.
 
 Verified:
 - Offline tests (cron, image refs, labels, notification payloads, one full tick against mocked Coolify and Docker).
-- The image builds and runs as `nobody`, `TZ` works, and both compose files validate.
+- The image builds and runs as `nobody`, timezones work, and both compose files validate.
 - Registry digest checks against the real Docker Hub and ghcr.io match Docker's local `RepoDigests`.
 - End to end with a real socket proxy, labelled containers and a mock Coolify API: finds the service, ignores stray labels, reports an outdated image, and calls `restart?latest=true` when `DRY_RUN=false`.
 - Discord webhook notifications arrive with the expected formatting.
+- On a real Coolify: the compose `networks:` setup is respected (updater reaches `http://coolify:8080`, the proxy is only on the stack's own networks), Allowed API IPs with the `coolify` subnet works, and a `read` token is enough for discovery. `/api/v1/version` answers with plain text, not JSON. `GET /servers` returns `settings.server_id` and `settings.server_timezone` to a `read` token (not yet exercised by the updater itself on a real server).
 
 Not verified yet: everything under "Unverified assumptions" above.
 
-Next step: deploy with `DRY_RUN=true`, opt in one low-risk service (task or label), and read the startup report.
+Next step: opt in one low-risk service (task or label) and check the table and digest report in the logs.
 
 ## Backlog (rough priority)
 1. Fix whatever the first real dry run shows (mapping, registry errors).
