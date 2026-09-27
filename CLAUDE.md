@@ -43,10 +43,9 @@ The repo goes on GitHub (`KimTholstorf/coolify-watchtower`). CI builds a multi-a
 - Coolify's schedule words map as `daily` = `0 0 * * *`, `weekly` = `0 0 * * 0`, and so on (`CRON_ALIASES`).
 - Coolify keeps user-defined labels such as `coolify.auto-update` from a service's compose file when it adds its own labels, and the compose project stays the service uuid.
 - Coolify's Docker Compose build pack builds `docker-compose.build.yml` from the GitHub repo as expected.
-- The registry digest check hasn't been run against the real Docker Hub or ghcr.io, only a mock.
 
 ## Status
-v1 is written and passes the offline tests. It has not yet been deployed, and neither the Docker image build nor the CI workflow has been run. Next step: push to GitHub, deploy with `DRY_RUN=true` on the homelab Coolify server, add an `auto-update` task (or label) to one low-risk service, and read the startup report.
+v1 is written and passes the offline tests. It has not yet been deployed to Coolify. CI (run #1, commit e306c60) passed and published `ghcr.io/kimtholstorf/coolify-watchtower:latest`, which is publicly pullable. Verified locally in OrbStack on 2026-09-27: the image builds and runs as `nobody` with working `TZ`, both compose files validate, the registry digest check matches local `RepoDigests` on the real Docker Hub and ghcr.io, and an end-to-end run (real socket proxy, labelled container, mock Coolify API) found the service, ignored a stray labelled container, reported an outdated image and called `restart?latest=true` with `DRY_RUN=false`. Next step: push to GitHub, deploy with `DRY_RUN=true` on the homelab Coolify server, add an `auto-update` task (or label) to one low-risk service, and read the startup report.
 
 ## Backlog (rough priority)
 1. Fix whatever the first real dry run shows (mapping, registry errors).
