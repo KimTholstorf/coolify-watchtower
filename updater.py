@@ -26,7 +26,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 
 
 def env_bool(name, default):
@@ -506,10 +506,20 @@ def main():
     if not COOLIFY_TOKEN:
         log("ERROR COOLIFY_TOKEN is not set")
         raise SystemExit(1)
-    st, ver = coolify("GET", "/version")
-    if st != 200:
-        log(f"ERROR cannot reach Coolify API: HTTP {st} {ver}")
-        raise SystemExit(1)
+    # Retry instead of exiting, so a bad token or unreachable Coolify doesn't become a
+    # restart loop hammering the API. No heartbeat meanwhile, so the container turns unhealthy.
+    while True:
+        try:
+            st, ver = coolify("GET", "/version")
+        except Exception as e:
+            st, ver = None, e
+        if st == 200:
+            break
+        hint = ""
+        if st in (401, 403):
+            hint = " - COOLIFY_TOKEN needs both 'read' and 'deploy', and this container's IP must be in Allowed API IPs"
+        log(f"ERROR cannot reach Coolify API: HTTP {st} {ver}{hint}. Retrying in 60 s.")
+        time.sleep(60)
     log(f"Coolify API OK (version {ver})")
     try:
         docker_get("/version")
