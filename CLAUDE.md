@@ -21,6 +21,7 @@ The repo goes on GitHub (`KimTholstorf/coolify-watchtower`). CI builds a multi-a
 - `Dockerfile`: `python:3.13-alpine` + `tzdata`, runs as `nobody`.
 - `docker-compose.yml`: pulls the ghcr.io image. For pasting into Coolify and, later, the one-click template.
 - `docker-compose.build.yml`: the same, with `build: .`. Used when Coolify deploys from the GitHub repo. Keep the two in sync.
+- `assets/`: the pixel lighthouse logo. `make_logo.py` generates `logo.svg` (transparent) and `logo-icon.svg` (on a disc) from a text grid; `logo-icon.png` is a raster export.
 - `.github/workflows/image.yml`: runs the tests, then builds amd64+arm64 and pushes to ghcr.io on `main` (`latest`) and `v*` tags (semver). Pull requests build without pushing.
 - `tests/test_updater.py`: offline tests covering cron, image refs, and one full tick against mocked Coolify and Docker HTTP servers. Run with `python3 tests/test_updater.py`.
 - `README.md`: user-facing setup.
@@ -46,7 +47,18 @@ The repo goes on GitHub (`KimTholstorf/coolify-watchtower`). CI builds a multi-a
 - Coolify's Docker Compose build pack builds `docker-compose.build.yml` from the GitHub repo as expected.
 
 ## Status
-v1 is written and passes the offline tests. It has not yet been deployed to Coolify. CI (run #1, commit e306c60) passed and published `ghcr.io/kimtholstorf/coolify-watchtower:latest`, which is publicly pullable. Verified locally in OrbStack on 2026-09-27: the image builds and runs as `nobody` with working `TZ`, both compose files validate, the registry digest check matches local `RepoDigests` on the real Docker Hub and ghcr.io, and an end-to-end run (real socket proxy, labelled container, mock Coolify API) found the service, ignored a stray labelled container, reported an outdated image and called `restart?latest=true` with `DRY_RUN=false`. Next step: push to GitHub, deploy with `DRY_RUN=true` on the homelab Coolify server, add an `auto-update` task (or label) to one low-risk service, and read the startup report.
+v1 is published as `ghcr.io/kimtholstorf/coolify-watchtower` but hasn't run against a real Coolify yet.
+
+Verified:
+- Offline tests (cron, image refs, labels, notification payloads, one full tick against mocked Coolify and Docker).
+- The image builds and runs as `nobody`, `TZ` works, and both compose files validate.
+- Registry digest checks against the real Docker Hub and ghcr.io match Docker's local `RepoDigests`.
+- End to end with a real socket proxy, labelled containers and a mock Coolify API: finds the service, ignores stray labels, reports an outdated image, and calls `restart?latest=true` when `DRY_RUN=false`.
+- Discord webhook notifications arrive with the expected formatting.
+
+Not verified yet: everything under "Unverified assumptions" above.
+
+Next step: deploy with `DRY_RUN=true`, opt in one low-risk service (task or label), and read the startup report.
 
 ## Backlog (rough priority)
 1. Fix whatever the first real dry run shows (mapping, registry errors).
