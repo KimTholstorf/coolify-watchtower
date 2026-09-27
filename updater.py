@@ -26,7 +26,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 
 def env_bool(name, default):
@@ -217,13 +217,18 @@ def server_timezones():
     return result
 
 
+def set_log_tz(tzs):
+    """Log in the servers' timezone when they all agree, else UTC."""
+    global LOG_TZ
+    LOG_TZ = zone(next(iter(set(tzs.values()))) if len(set(tzs.values())) == 1 else "UTC")
+
+
 def discover():
     """Return ({service_uuid: {name, frequency, enabled, source, timezone}}, [ignored container names]).
 
     Opt-in is a scheduled task named TASK_NAME or a container carrying AUTO_UPDATE_LABEL.
     The task wins over the label. Labelled containers outside any service are ignored.
     Schedules use TZ if set, else the timezone of the server the service runs on."""
-    global LOG_TZ
     st, services = coolify("GET", "/services")
     if st != 200 or not isinstance(services, list):
         log(f"ERROR listing services: HTTP {st} {services}")
@@ -237,7 +242,7 @@ def discover():
         if tzs is None:
             warn_once("servers", "cannot read server timezones from Coolify (GET /servers) - using UTC")
             tzs = {}
-        LOG_TZ = zone(next(iter(set(tzs.values()))) if len(set(tzs.values())) == 1 else "UTC")
+        set_log_tz(tzs)
 
     def tz_for(uuid):
         return TZ_OVERRIDE or tzs.get(server_of.get(uuid)) or "UTC"
@@ -480,6 +485,11 @@ def tick(now, state):
 
 
 def main():
+    if COOLIFY_TOKEN and not TZ_OVERRIDE:
+        try:  # so even the first log lines use the server's timezone
+            set_log_tz(server_timezones() or {})
+        except Exception:
+            pass
     log(f"coolify-watchtower {VERSION} | coolify={COOLIFY_URL} docker={DOCKER_URL} "
         f"task='{TASK_NAME}' label='{AUTO_UPDATE_LABEL}' tz={TZ_OVERRIDE or 'from Coolify servers'} dry_run={DRY_RUN}")
     if not COOLIFY_TOKEN:
