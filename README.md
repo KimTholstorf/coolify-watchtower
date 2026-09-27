@@ -19,7 +19,7 @@ You can follow what happens in several places:
 
 ## Setup
 
-1. Enable API access in Coolify's settings, then create an API token under Keys & Tokens → API tokens with `read` and `deploy`. A `read` token is enough while `DRY_RUN` is on. If restart returns 403, add `write`. If you restrict Allowed API IPs, include the subnet of the `coolify` Docker network (`docker network inspect coolify`).
+1. Enable API access in Coolify's settings, then create an API token under Keys & Tokens → API tokens with `read` and `deploy`. If restart returns 403, add `write`. If you restrict Allowed API IPs, include the subnet of the `coolify` Docker network (`docker network inspect coolify`).
 2. Deploy it in one of two ways:
    - From this GitHub repo, so Coolify builds the image: connect GitHub through Coolify's [GitHub App source](https://coolify.io/docs/applications/sources/github/app), create a resource from this repo, choose the Docker Compose build pack and set Docker Compose Location to `/docker-compose.build.yml`.
    - From the prebuilt image: + New Resource → Docker Compose (empty), then paste `docker-compose.yml`. It pulls `ghcr.io/kimtholstorf/coolify-watchtower:latest`.

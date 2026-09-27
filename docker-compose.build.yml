@@ -21,8 +21,15 @@ services:
     networks:
       - default
       - coolify
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys, time; sys.exit(time.time() - os.path.getmtime('/tmp/heartbeat') > 180)"]
+      interval: 60s
+      timeout: 10s
+      start_period: 5m
+      retries: 3
     depends_on:
-      - socket-proxy
+      socket-proxy:
+        condition: service_healthy
     restart: unless-stopped
 
   socket-proxy:
@@ -33,6 +40,13 @@ services:
       - POST=0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2375/version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
     networks:
       - default
     restart: unless-stopped

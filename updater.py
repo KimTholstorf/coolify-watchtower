@@ -26,7 +26,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 
 
 def env_bool(name, default):
@@ -44,6 +44,8 @@ REPORT_ON_START = env_bool("REPORT_ON_START", "true")
 NOTIFY_URL = os.environ.get("NOTIFY_URL", "").strip()
 # Empty TZ: each service follows its server's timezone from Coolify (Servers -> General).
 TZ_OVERRIDE = os.environ.get("TZ", "").strip()
+# Touched every loop; the container health check fails if it goes stale.
+HEARTBEAT = os.environ.get("HEARTBEAT_FILE", "/tmp/heartbeat")
 
 ACCEPT_MANIFESTS = ", ".join([
     "application/vnd.oci.image.index.v1+json",
@@ -89,6 +91,14 @@ LOG_TZ = zone(TZ_OVERRIDE)
 def log(msg):
     stamp = datetime.now(LOG_TZ).strftime("%Y-%m-%d %H:%M:%S")
     print(f"{stamp} {msg}", flush=True)
+
+
+def beat():
+    try:
+        with open(HEARTBEAT, "w") as f:
+            f.write(str(int(time.time())))
+    except OSError as e:
+        warn_once("heartbeat", f"cannot write heartbeat {HEARTBEAT}: {e}")
 
 
 def warn_once(key, msg):
@@ -512,6 +522,7 @@ def main():
         log(f"WARN '{TASK_NAME}' tasks on applications are not supported in v1 (services only): {', '.join(apps)}")
 
     state = {}
+    beat()
     if REPORT_ON_START:
         found, ignored = discover() or ({}, [])
         state["fingerprint"] = json.dumps([found, ignored], sort_keys=True)
@@ -523,6 +534,7 @@ def main():
 
     last = None
     while True:
+        beat()
         now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
         if now != last:
             last = now
