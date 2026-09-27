@@ -26,7 +26,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 
 def env_bool(name, default):
@@ -450,7 +450,8 @@ def check_service(uuid, cfg, allow_restart):
         notify(f"coolify-watchtower: updating {name}", summary)
     else:
         log(f"[{name}] ERROR restart HTTP {st} {data}")
-        notify(f"coolify-watchtower: FAILED {name}", f"HTTP {st}\n{summary}")
+        reason = data.get("message") if isinstance(data, dict) else data
+        notify(f"coolify-watchtower: FAILED {name}", f"HTTP {st}: {reason}\n{summary}")
 
 
 def print_table(found, ignored):

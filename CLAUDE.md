@@ -41,7 +41,7 @@ The repo goes on GitHub (`KimTholstorf/coolify-watchtower`). CI builds a multi-a
 - **Task-as-config with a no-op `true`** was chosen: the schedule is editable per service in the native UI, execution is visible centrally in Settings → Scheduled Jobs, and all privileges stay in one central service. The trade-off is that Coolify's execution history shows the no-op, not the update; actual updates appear in the service's deployment history and in the updater's logs.
 
 ## Unverified assumptions (check against the real server first)
-- **Token permissions:** `read` + `deploy` should be enough for restart; `write` may be needed.
+- **Token permissions:** per Coolify's source (`routes/api.php`, `ServicePolicy::deploy`, `ApiAbility`), restart needs the `deploy` ability and a token owned by a team admin/owner; `write` is not needed. A member's token with `deploy` gets 403 on every call. Not yet confirmed by a successful real restart.
 - Coolify's schedule words map as `daily` = `0 0 * * *`, `weekly` = `0 0 * * 0`, and so on (`CRON_ALIASES`).
 - Coolify keeps user-defined labels such as `coolify.auto-update` from a service's compose file when it adds its own labels, and the compose project stays the service uuid.
 - Coolify's Docker Compose build pack builds `docker-compose.build.yml` from the GitHub repo as expected.
@@ -55,7 +55,7 @@ Verified:
 - Registry digest checks against the real Docker Hub and ghcr.io match Docker's local `RepoDigests`.
 - End to end with a real socket proxy, labelled containers and a mock Coolify API: finds the service, ignores stray labels, reports an outdated image, and calls `restart?latest=true` when `DRY_RUN=false`.
 - Discord webhook notifications arrive with the expected formatting.
-- On a real Coolify: the compose `networks:` setup is respected (updater reaches `http://coolify:8080`, the proxy is only on the stack's own networks), Allowed API IPs with the `coolify` subnet works. Discovery works with a `read` + `deploy` token (whether `read` alone suffices is untested). `/api/v1/version` answers with plain text, not JSON. `GET /servers` returns `settings.server_id` and `settings.server_timezone` (not hidden, so `read:sensitive` isn't needed) and the updater uses them: schedules fire in the server's timezone, at the same minute Coolify runs the task.
+- On a real Coolify: the compose `networks:` setup is respected (updater reaches `http://coolify:8080`, the proxy is only on the stack's own networks), Allowed API IPs with the `coolify` subnet works. A `read`-only token is enough for discovery, timezones and dry runs; restart with it returns 403, as expected. `/api/v1/version` answers with plain text, not JSON. `GET /servers` returns `settings.server_id` and `settings.server_timezone` (not hidden, so `read:sensitive` isn't needed) and the updater uses them: schedules fire in the server's timezone, at the same minute Coolify runs the task.
 - The scheduled-tasks API endpoints exist (Coolify v4.3.23).
 - A real dry run on an opted-in service: containers were matched to the service (compose project label or `-<uuid>` name suffix), the Docker Hub digest check found a real update, and the dry-run Discord notification arrived.
 
