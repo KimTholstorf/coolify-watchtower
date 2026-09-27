@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+"""coolify-watchtower v1 - Coolify-native image auto-updater.
+
+A Coolify service opts in either with a Scheduled Task in its own tab named
+TASK_NAME (default "auto-update", command `true`), or with the container label
+AUTO_UPDATE_LABEL (default "coolify.auto-update") in its compose file, whose
+value is the schedule. The task wins if both exist.
+This service reads tasks via the Coolify API and labels via Docker, and when one is due it
+compares local image digests (read-only Docker via socket proxy) with the
+registry. Only if something changed does it call Coolify's
+`restart?latest=true`, so Coolify itself performs the update.
+
+Stdlib only.
+"""
+import json
+import os
+import re
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None
+
+VERSION = "1.1.0"
+
+
+def env_bool(name, default):
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+COOLIFY_URL = os.environ.get("COOLIFY_URL", "http://coolify:8080").rstrip("/")
+COOLIFY_TOKEN = os.environ.get("COOLIFY_TOKEN", "").strip()
+DOCKER_URL = os.environ.get("DOCKER_HOST", "tcp://socket-proxy:2375").replace("tcp://", "http://").rstrip("/")
+TASK_NAME = os.environ.get("TASK_NAME", "auto-update").strip().lower()
+AUTO_UPDATE_LABEL = os.environ.get("AUTO_UPDATE_LABEL", "coolify.auto-update").strip()
+DEFAULT_SCHEDULE = os.environ.get("DEFAULT_SCHEDULE", "daily").strip()
+DRY_RUN = env_bool("DRY_RUN", "true")
+REPORT_ON_START = env_bool("REPORT_ON_START", "true")
+NOTIFY_URL = os.environ.get("NOTIFY_URL", "").strip()
+TZ_NAME = os.environ.get("TZ", "UTC")
+
+ACCEPT_MANIFESTS = ", ".join([
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+])
+
+# Coolify accepts these words as schedules in addition to 5-field cron.
+CRON_ALIASES = {
+    "every_minute": "* * * * *",
+    "hourly": "0 * * * *",
+    "daily": "0 0 * * *",
+    "weekly": "0 0 * * 0",
+    "monthly": "0 0 1 * *",
+    "yearly": "0 0 1 1 *",
+    "annually": "0 0 1 1 *",
+}
+
+
+# ---------------------------------------------------------------- utilities
+
+def log(msg):
+    stamp = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{stamp} {msg}", flush=True)
+
+
+def load_tz():
+    if ZoneInfo is None:
+        return timezone.utc
+    try:
+        return ZoneInfo(TZ_NAME)
+    except Exception:
+        print(f"WARN unknown timezone '{TZ_NAME}' (mount /usr/share/zoneinfo?), using UTC", flush=True)
+        return timezone.utc
+
+
+TZ = load_tz()
+
+
+def http(method, url, headers=None, data=None, timeout=20):
+    req = urllib.request.Request(url, method=method, headers=headers or {}, data=data)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.headers, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read()
+
+
+def notify(title, body):
+    if not NOTIFY_URL:
+        return
+    try:
+        http("POST", NOTIFY_URL, {"Title": title, "Content-Type": "text/plain"}, body.encode())
+    except Exception as e:
+        log(f"WARN notify failed: {e}")
+
+
+def short(digest):
+    return digest.split(":", 1)[-1][:12] if digest else "?"
+
+
+# ---------------------------------------------------------------- cron
+
+def _field_match(field, value, lo, hi, is_dow=False):
+    for part in field.split(","):
+        step = 1
+        if "/" in part:
+            part, s = part.split("/", 1)
+            step = int(s)
+        if part in ("*", ""):
+            a, b = lo, hi
+        elif "-" in part:
+            a, b = (int(x) for x in part.split("-", 1))
+        else:
+            a = int(part)
+            b = hi if step > 1 else a
+        for x in range(a, b + 1, step):
+            if x == value or (is_dow and x == 7 and value == 0):
+                return True
+    return False
+
+
+def cron_match(expr, dt):
+    """Match a 5-field cron expression (numbers, *, ranges, lists, steps) or a Coolify alias."""
+    e = (expr or "").strip().lower().lstrip("@")
+    e = CRON_ALIASES.get(e, e)
+    f = e.split()
+    if len(f) != 5:
+        raise ValueError(f"unsupported schedule '{expr}'")
+    minute = _field_match(f[0], dt.minute, 0, 59)
+    hour = _field_match(f[1], dt.hour, 0, 23)
+    dom = _field_match(f[2], dt.day, 1, 31)
+    month = _field_match(f[3], dt.month, 1, 12)
+    dow = _field_match(f[4], dt.isoweekday() % 7, 0, 7, is_dow=True)
+    # Standard cron: if both day-of-month and day-of-week are restricted, either may match.
+    if f[2] != "*" and f[4] != "*":
+        day = dom or dow
+    else:
+        day = dom and dow
+    return minute and hour and month and day
+
+
+# ---------------------------------------------------------------- coolify api
+
+def coolify(method, path):
+    st, _, body = http(method, f"{COOLIFY_URL}/api/v1{path}", {
+        "Authorization": f"Bearer {COOLIFY_TOKEN}",
+        "Accept": "application/json",
+    })
+    try:
+        data = json.loads(body) if body else None
+    except ValueError:
+        data = None
+    return st, data
+
+
+def label_schedule(value):
+    """Label value -> (frequency, enabled). Empty/'true' means DEFAULT_SCHEDULE, 'false' pauses."""
+    v = (value or "").strip()
+    if v.lower() in ("", "true", "1", "yes", "on"):
+        return DEFAULT_SCHEDULE, True
+    if v.lower() in ("false", "0", "no", "off"):
+        return v, False
+    return v, True
+
+
+def discover():
+    """Return ({service_uuid: {name, frequency, enabled, source}}, [ignored container names]).
+
+    Opt-in is a scheduled task named TASK_NAME or a container carrying AUTO_UPDATE_LABEL.
+    The task wins over the label. Labelled containers outside any service are ignored."""
+    st, services = coolify("GET", "/services")
+    if st != 200 or not isinstance(services, list):
+        log(f"ERROR listing services: HTTP {st} {services}")
+        return None
+    names = {s["uuid"]: s.get("name") or s["uuid"] for s in services if s.get("uuid")}
+    found = {}
+    for uuid, name in names.items():
+        st, tasks = coolify("GET", f"/services/{uuid}/scheduled-tasks")
+        if st != 200 or not isinstance(tasks, list):
+            continue
+        for t in tasks:
+            if (t.get("name") or "").strip().lower() == TASK_NAME:
+                found[uuid] = {
+                    "name": name,
+                    "frequency": t.get("frequency") or "",
+                    "enabled": bool(t.get("enabled", True)),
+                    "source": "task",
+                }
+
+    ignored = []
+    if AUTO_UPDATE_LABEL:
+        try:
+            containers = docker_get("/containers/json")
+        except Exception as e:
+            log(f"WARN label discovery: {e}")
+            containers = []
+        for c in containers:
+            labels = c.get("Labels") or {}
+            if AUTO_UPDATE_LABEL not in labels:
+                continue
+            uuid = owner_uuid(c, names)
+            if not uuid:
+                ignored.append((c.get("Names") or ["?"])[0].lstrip("/"))
+                continue
+            if uuid in found:
+                continue
+            frequency, enabled = label_schedule(labels[AUTO_UPDATE_LABEL])
+            found[uuid] = {"name": names[uuid], "frequency": frequency, "enabled": enabled, "source": "label"}
+    return found, sorted(ignored)
+
+
+def discover_unsupported_apps():
+    st, apps = coolify("GET", "/applications")
+    if st != 200 or not isinstance(apps, list):
+        return []
+    names = []
+    for a in apps:
+        st, tasks = coolify("GET", f"/applications/{a.get('uuid')}/scheduled-tasks")
+        if st == 200 and isinstance(tasks, list):
+            if any((t.get("name") or "").strip().lower() == TASK_NAME for t in tasks):
+                names.append(a.get("name") or a.get("uuid"))
+    return names
+
+
+def restart_service(uuid):
+    path = f"/services/{uuid}/restart?latest=true"
+    st, data = coolify("POST", path)
+    if st == 405:  # Coolify < 4.2.0 used GET
+        st, data = coolify("GET", path)
+    return st, data
+
+
+# ---------------------------------------------------------------- docker (read-only)
+
+def docker_get(path):
+    st, _, body = http("GET", f"{DOCKER_URL}{path}")
+    if st != 200:
+        raise RuntimeError(f"docker GET {path} -> HTTP {st}")
+    return json.loads(body)
+
+
+def owner_uuid(container, uuids):
+    """The service uuid (from uuids) a container belongs to: compose project == uuid, or name suffix."""
+    project = (container.get("Labels") or {}).get("com.docker.compose.project")
+    if project in uuids:
+        return project
+    for n in container.get("Names") or []:
+        for uuid in uuids:
+            if n.lstrip("/").endswith("-" + uuid):
+                return uuid
+    return None
+
+
+def service_containers(uuid):
+    """Running containers belonging to a Coolify service."""
+    return [c for c in docker_get("/containers/json") if owner_uuid(c, {uuid}) == uuid]
+
+
+# ---------------------------------------------------------------- registry
+
+def parse_ref(ref):
+    """'nginx' -> ('docker.io', 'library/nginx', 'latest'). None if pinned by digest/ID."""
+    if not ref or "@" in ref or ref.startswith("sha256:"):
+        return None
+    name, tag = ref, "latest"
+    if ":" in ref.rsplit("/", 1)[-1]:
+        name, tag = ref.rsplit(":", 1)
+    first, _, rest = name.partition("/")
+    if rest and ("." in first or ":" in first or first == "localhost"):
+        registry, repo = first, rest
+    else:
+        registry, repo = "docker.io", name
+    if registry == "docker.io" and "/" not in repo:
+        repo = "library/" + repo
+    return registry, repo, tag
+
+
+def _registry_token(challenge):
+    if not challenge or not challenge.lower().startswith("bearer"):
+        return None
+    params = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
+    realm = params.pop("realm", None)
+    if not realm:
+        return None
+    query = urllib.parse.urlencode(params)
+    st, _, body = http("GET", realm + ("?" + query if query else ""))
+    if st != 200:
+        return None
+    data = json.loads(body)
+    return data.get("token") or data.get("access_token")
+
+
+def remote_digest(registry, repo, tag):
+    host = "registry-1.docker.io" if registry == "docker.io" else registry
+    url = f"https://{host}/v2/{repo}/manifests/{tag}"
+    headers = {"Accept": ACCEPT_MANIFESTS}
+    st, h, _ = http("HEAD", url, headers)
+    if st == 401:
+        token = _registry_token(h.get("WWW-Authenticate", ""))
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+            st, h, _ = http("HEAD", url, headers)
+    if st != 200:
+        raise RuntimeError(f"registry HTTP {st} (private registry or missing tag?)")
+    digest = h.get("Docker-Content-Digest")
+    if not digest:
+        raise RuntimeError("registry returned no Docker-Content-Digest")
+    return digest
+
+
+# ---------------------------------------------------------------- core
+
+def check_service(uuid, cfg, allow_restart):
+    name = cfg["name"]
+    try:
+        containers = service_containers(uuid)
+    except Exception as e:
+        log(f"[{name}] ERROR docker: {e}")
+        return
+    if not containers:
+        log(f"[{name}] no running containers found for uuid {uuid} - skipped")
+        return
+
+    changed, seen = [], set()
+    for c in containers:
+        cname = (c.get("Names") or ["?"])[0].lstrip("/")
+        try:
+            inspect = docker_get(f"/containers/{c['Id']}/json")
+            ref = (inspect.get("Config") or {}).get("Image", "")
+            parsed = parse_ref(ref)
+            if not parsed:
+                log(f"[{name}] {cname}: '{ref}' pinned by digest/ID - skipped")
+                continue
+            if ref in seen:
+                continue
+            seen.add(ref)
+            image = docker_get(f"/images/{inspect['Image']}/json")
+            local = {d.split("@", 1)[1] for d in image.get("RepoDigests") or [] if "@" in d}
+            if not local:
+                log(f"[{name}] {cname}: {ref} has no registry digest (locally built?) - skipped")
+                continue
+            remote = remote_digest(*parsed)
+            if remote in local:
+                log(f"[{name}] {cname}: {ref} up to date ({short(remote)})")
+            else:
+                log(f"[{name}] {cname}: {ref} UPDATE {short(sorted(local)[0])} -> {short(remote)}")
+                changed.append(f"{ref} {short(sorted(local)[0])} -> {short(remote)}")
+        except Exception as e:
+            log(f"[{name}] {cname}: ERROR {e}")
+
+    if not changed:
+        return
+    summary = "\n".join(changed)
+    if not allow_restart:
+        log(f"[{name}] update available (report only, no restart)")
+        return
+    if DRY_RUN:
+        log(f"[{name}] DRY_RUN - would call restart?latest=true")
+        notify(f"coolify-watchtower (dry run): {name}", summary)
+        return
+    st, data = restart_service(uuid)
+    if st in (200, 201, 202):
+        log(f"[{name}] restart?latest=true queued")
+        notify(f"coolify-watchtower: updating {name}", summary)
+    else:
+        log(f"[{name}] ERROR restart HTTP {st} {data}")
+        notify(f"coolify-watchtower: FAILED {name}", f"HTTP {st}\n{summary}")
+
+
+def print_table(found, ignored):
+    if ignored:
+        log(f"WARN label '{AUTO_UPDATE_LABEL}' on containers outside Coolify services "
+            f"(applications are not supported) - ignored: {', '.join(ignored)}")
+    if not found:
+        log(f"No services with a scheduled task named '{TASK_NAME}' or label '{AUTO_UPDATE_LABEL}'.")
+        return
+    log(f"Services with '{TASK_NAME}' task or '{AUTO_UPDATE_LABEL}' label:")
+    width = max(len(v["name"]) for v in found.values())
+    for uuid, v in sorted(found.items(), key=lambda kv: kv[1]["name"].lower()):
+        state = "enabled " if v["enabled"] else "DISABLED"
+        print(f"    {v['name'].ljust(width)}  {state}  {v['source']:<5}  {v['frequency']:<14}  {uuid}", flush=True)
+
+
+def tick(now, state):
+    result = discover()
+    if result is None:
+        return
+    found, ignored = result
+    fingerprint = json.dumps([found, ignored], sort_keys=True)
+    if fingerprint != state.get("fingerprint"):
+        state["fingerprint"] = fingerprint
+        print_table(found, ignored)
+    for uuid, cfg in found.items():
+        if not cfg["enabled"]:
+            continue
+        try:
+            due = cron_match(cfg["frequency"], now)
+        except ValueError as e:
+            key = (uuid, cfg["frequency"])
+            if key not in state.setdefault("bad", set()):
+                state["bad"].add(key)
+                log(f"[{cfg['name']}] WARN {e} - ignored")
+            continue
+        if due:
+            log(f"[{cfg['name']}] schedule '{cfg['frequency']}' due - checking")
+            check_service(uuid, cfg, allow_restart=True)
+
+
+def main():
+    log(f"coolify-watchtower {VERSION} | coolify={COOLIFY_URL} docker={DOCKER_URL} "
+        f"task='{TASK_NAME}' label='{AUTO_UPDATE_LABEL}' tz={TZ_NAME} dry_run={DRY_RUN}")
+    if not COOLIFY_TOKEN:
+        log("ERROR COOLIFY_TOKEN is not set")
+        raise SystemExit(1)
+    st, ver = coolify("GET", "/version")
+    if st != 200:
+        log(f"ERROR cannot reach Coolify API: HTTP {st} {ver}")
+        raise SystemExit(1)
+    log(f"Coolify API OK (version {ver})")
+    try:
+        docker_get("/version")
+        log("Docker (socket proxy) OK")
+    except Exception as e:
+        log(f"ERROR docker: {e}")
+        raise SystemExit(1)
+
+    apps = discover_unsupported_apps()
+    if apps:
+        log(f"WARN '{TASK_NAME}' tasks on applications are not supported in v1 (services only): {', '.join(apps)}")
+
+    state = {}
+    if REPORT_ON_START:
+        found, ignored = discover() or ({}, [])
+        state["fingerprint"] = json.dumps([found, ignored], sort_keys=True)
+        print_table(found, ignored)
+        for uuid, cfg in found.items():
+            if cfg["enabled"]:
+                check_service(uuid, cfg, allow_restart=False)
+        log("Startup report done. Waiting for schedules.")
+
+    last = None
+    while True:
+        now = datetime.now(TZ).replace(second=0, microsecond=0)
+        if now != last:
+            last = now
+            try:
+                tick(now, state)
+            except Exception as e:
+                log(f"ERROR tick: {e}")
+        time.sleep(max(1.0, 60 - (time.time() % 60) + 1))
+
+
+if __name__ == "__main__":
+    main()
