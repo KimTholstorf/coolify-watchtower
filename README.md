@@ -15,7 +15,7 @@ coolify-watchtower checks the images of the services you choose, on a schedule y
 
 ## Why not Watchtower?
 
-Watchtower replaces containers behind Coolify's back. Coolify never learns about the update, Watchtower handles single containers rather than compose stacks, and it needs write access to the Docker socket.
+[Watchtower](https://github.com/nicholas-fedor/watchtower) is the usual way to keep Docker containers up to date. Nick Fedor maintains it today, after the original containrrr project was archived. On a Coolify server, though, it replaces containers behind Coolify's back. Coolify never learns about the update, Watchtower handles single containers rather than compose stacks, and it needs write access to the Docker socket.
 
 coolify-watchtower only reads from Docker. Every change goes through Coolify's API.
 
@@ -219,7 +219,7 @@ Both carry the same images: `latest` is always the newest release, and version t
 
 To have Coolify build the image from this repository instead, add it as a Git resource (for example through the [GitHub App source](https://coolify.io/docs/applications/sources/github/app)), choose the **Docker Compose** build pack and set **Docker Compose Location** to `/docker-compose.build.yml`. Coolify treats that as an application, so self-update doesn't apply; redeploy to update.
 
-Tests run offline with `python3 tests/test_updater.py`. Design notes and the backlog are in [CLAUDE.md](CLAUDE.md).
+Tests run offline with `python3 tests/test_updater.py`.
 
 ---
 
