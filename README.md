@@ -81,7 +81,7 @@ Docker (socket proxy) OK
 Services with 'auto-update' task or 'coolify.auto-update' label:
     coolify-watchtower  enabled   self   daily           Europe/Copenhagen   udgv5xuy2niy...
     uptime-kuma         enabled   task   30 4 * * *      Europe/Copenhagen   c92huq7by0wp...
-[uptime-kuma] uptime-kuma-c92huq7by0wp...: louislam/uptime-kuma:2 UPDATE 2.5.4 -> 2.5.5 (917318f9d7be -> c74379ac4509)
+[uptime-kuma] uptime-kuma: louislam/uptime-kuma:2 UPDATE 2.5.4 -> 2.5.5 (917318f9d7be -> c74379ac4509)
 [uptime-kuma] update available (report only, no restart)
 Startup report done. Waiting for schedules.
 ```

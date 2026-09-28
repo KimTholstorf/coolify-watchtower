@@ -110,6 +110,13 @@ assert found["app2"]["kind"] == "application" and found["app2"]["source"] == "ta
 assert "app1" not in found  # nixpacks application: not supported
 assert u.owner_uuid({"Names": ["/app2-20260928T111330"]}, {"app2"}) == "app2"
 assert u.discover_unsupported_apps() == ["myapp"]
+# Log lines: services name the container's role, applications nothing extra
+lines = []; orig_log = u.log; u.log = lines.append
+u.check_service("app2", found["app2"], allow_restart=False)
+u.check_service("svc1", found["svc1"], allow_restart=False)
+u.log = orig_log
+assert any(l.startswith("[kuma-app] louislam/uptime-kuma:2 UPDATE") for l in lines), lines
+assert any(l.startswith("[uptime-kuma] uptime-kuma: louislam/uptime-kuma:2 UPDATE") for l in lines), lines
 assert "/api/v1/deploy?uuid=app2" in all_restarts, all_restarts
 assert u.describe_change("docker.io", "louislam/uptime-kuma", {"sha256:aaaaaaaaaaaaaaaa"}, "sha256:bbbbbbbbbbbbbbbbbb") == "aaaaaaaaaaaa -> 2.1.0"
 # Self-update: we run in svc4 (label "true"). Our own label is ignored; SELF_UPDATE decides.

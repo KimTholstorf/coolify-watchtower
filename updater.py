@@ -28,7 +28,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 
 
 def env_bool(name, default):
@@ -520,12 +520,16 @@ def check_service(uuid, cfg, allow_restart):
     changed, seen = [], set()
     for c in containers:
         cname = (c.get("Names") or ["?"])[0].lstrip("/")
+        # Normal lines name the container's role: its compose service name for services (the part
+        # before -<uuid>), nothing for an application (one container). Errors keep the full name.
+        role = "" if cfg.get("kind") == "application" else cname.removesuffix("-" + uuid)
+        who = f"{role}: " if role else ""
         try:
             inspect = docker_get(f"/containers/{c['Id']}/json")
             ref = (inspect.get("Config") or {}).get("Image", "")
             parsed = parse_ref(ref)
             if not parsed:
-                log(f"[{name}] {cname}: '{ref}' pinned by digest/ID - skipped")
+                log(f"[{name}] {who}'{ref}' pinned by digest/ID - skipped")
                 continue
             if ref in seen:
                 continue
@@ -533,15 +537,15 @@ def check_service(uuid, cfg, allow_restart):
             image = docker_get(f"/images/{inspect['Image']}/json")
             local = {d.split("@", 1)[1] for d in image.get("RepoDigests") or [] if "@" in d}
             if not local:
-                log(f"[{name}] {cname}: {ref} has no registry digest (locally built?) - skipped")
+                log(f"[{name}] {who}{ref} has no registry digest (locally built?) - skipped")
                 continue
             remote = remote_digest(*parsed)
             if remote in local:
-                log(f"[{name}] {cname}: {ref} up to date ({short(remote)})")
+                log(f"[{name}] {who}{ref} up to date ({short(remote)})")
             else:
                 change = describe_change(parsed[0], parsed[1], local, remote)
                 digests = f"{short(sorted(local)[0])} -> {short(remote)}"
-                log(f"[{name}] {cname}: {ref} UPDATE {change}" + (f" ({digests})" if change != digests else ""))
+                log(f"[{name}] {who}{ref} UPDATE {change}" + (f" ({digests})" if change != digests else ""))
                 changed.append(f"{ref} {change}")
         except Exception as e:
             log(f"[{name}] {cname}: ERROR {e}")
