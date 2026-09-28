@@ -1,18 +1,24 @@
 name: dockerhub
 
-# Copies each version-tagged release from ghcr.io to Docker Hub once the image workflow has
-# built and pushed it. The copy is by digest, so both registries serve the exact same image.
-# Needs repository variable DOCKERHUB_USERNAME and secret DOCKERHUB_TOKEN (read & write).
+# copy: copies each version-tagged release from ghcr.io to Docker Hub once the image workflow has
+#   built and pushed it. The copy is by digest, so both registries serve the exact same image.
+# overview: publishes DOCKERHUB.md as the Docker Hub repository overview (overwriting it), whenever
+#   DOCKERHUB.md changes on main, after each release, and on manual runs.
+# Needs repository variable DOCKERHUB_USERNAME and secret DOCKERHUB_TOKEN. The overview needs the
+# token's "Read, Write, Delete" scope; the copy alone would work with "Read & Write".
 on:
   workflow_run:
     workflows: [image]
     types: [completed]
-  # Manual run from the Actions tab, e.g. for a release made before this workflow existed.
+  push:
+    branches: [main]
+    paths: [DOCKERHUB.md]
+  # Manual run from the Actions tab: copies the given release (if any) and updates the overview.
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to copy, e.g. v1.6.1"
-        required: true
+        description: "Release tag to copy, e.g. v1.6.1 (leave empty to only update the overview)"
+        required: false
 
 permissions:
   contents: read
@@ -20,7 +26,8 @@ permissions:
 jobs:
   copy:
     if: >-
-      github.event_name == 'workflow_dispatch' || (
+      (github.event_name == 'workflow_dispatch' && inputs.tag != '') || (
+      github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       startsWith(github.event.workflow_run.head_branch, 'v'))
@@ -51,3 +58,22 @@ jobs:
             --tag "$DST:latest" \
             "$src"
           docker buildx imagetools inspect "$DST:$version"
+
+  overview:
+    if: >-
+      github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_USERNAME }}/coolify-watchtower
+          readme-filepath: ./DOCKERHUB.md
+          short-description: Automatic image updates for Coolify services, carried out by Coolify itself.
