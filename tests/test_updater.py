@@ -101,5 +101,15 @@ restarts.clear()
 u.tick(datetime(2026,9,27,4,30,tzinfo=UTC), {})  # 06:30 in Copenhagen: svc1 not due
 assert "/api/v1/services/svc1/restart?latest=true" not in restarts
 assert u.describe_change("docker.io", "louislam/uptime-kuma", {"sha256:aaaaaaaaaaaaaaaa"}, "sha256:bbbbbbbbbbbbbbbbbb") == "aaaaaaaaaaaa -> 2.1.0"
+# Self-update: we run in svc4 (label "true"). Our own label is ignored; SELF_UPDATE decides.
+u.socket.gethostname = lambda: "c4"
+found, _ = u.discover()
+assert found["svc4"]["source"] == "self" and found["svc4"]["frequency"] == "daily" and found["svc4"]["self"], found["svc4"]
+u.SELF_UPDATE = "false"
+assert u.discover()[0]["svc4"]["enabled"] is False
+u.SELF_UPDATE = "0 5 * * *"
+assert u.discover()[0]["svc4"]["frequency"] == "0 5 * * *"
+u.socket.gethostname = lambda: "c1"  # a task on our own service still wins
+assert u.discover()[0]["svc1"]["source"] == "task"
 print("apps:", u.discover_unsupported_apps())
 print("harness ok")

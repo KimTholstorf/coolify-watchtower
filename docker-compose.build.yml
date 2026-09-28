@@ -17,10 +17,8 @@ services:
       - DEFAULT_SCHEDULE=${DEFAULT_SCHEDULE:-daily}
       - REPORT_ON_START=${REPORT_ON_START:-true}
       - NOTIFY_URL=${NOTIFY_URL:-}
+      - SELF_UPDATE=${SELF_UPDATE:-daily}
       - DOCKER_HOST=tcp://socket-proxy:2375
-    labels:
-      # The updater updates itself on this schedule (a cron like "0 5 * * *", or "false" to turn it off).
-      - coolify.auto-update=${SELF_UPDATE:-daily}
     networks:
       - default
       - coolify

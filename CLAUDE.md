@@ -37,7 +37,7 @@ The repo goes on GitHub (`KimTholstorf/coolify-watchtower`). CI builds a multi-a
 
 ## Design decisions and rejected alternatives
 - **Prefer the image over the compose file.** Coolify keeps each user's pasted compose file (and one-click services keep the template as it was when created), so compose changes only reach users who re-paste by hand, while image changes arrive with Pull Latest or self-update. Put behaviour in code or the `Dockerfile` (defaults, the updater's health check); change the compose files only when unavoidable and call it out in release notes.
-- **Self-update** is the `coolify.auto-update=${SELF_UPDATE:-daily}` label on the updater's own compose service (on by default). Only works for the pasted-compose (service) install, not the Git/build (application) one. When several services are due in one minute, `own_service()` finds our container (hostname == container ID prefix) and restarts our service last.
+- **Self-update** is done in code: `discover()` finds our own service (`own_service()`: hostname == container ID prefix) and opts it in with the `SELF_UPDATE` env var (default `daily`, `false` turns it off). A task on our service still wins; `coolify.auto-update` labels on our own containers are ignored. It was a label first, but **Coolify does not interpolate `${...}` inside compose `labels:`** (only in `environment:`), so the label arrived literally. Only works for the pasted-compose (service) install, not the Git/build (application) one. When several services are due in one minute, our service restarts last.
 - **Watchtower (nicholas-fedor fork)** was rejected. It recreates containers behind Coolify's back, isn't compose-aware, needs a writable socket, and updates don't appear in Coolify's deployment history.
 - **Per-service tasks that call the API themselves** were rejected: every container would need curl, network access to Coolify, and a token, and a task would restart its own container.
 - **Host cron** was rejected because it isn't visible in the Coolify UI.
@@ -48,7 +48,7 @@ The repo goes on GitHub (`KimTholstorf/coolify-watchtower`). CI builds a multi-a
 - Coolify's schedule words map as `daily` = `0 0 * * *`, `weekly` = `0 0 * * 0`, and so on (`CRON_ALIASES`).
 - Coolify keeps user-defined labels such as `coolify.auto-update` from a service's compose file when it adds its own labels, and the compose project stays the service uuid.
 - Coolify's Docker Compose build pack builds `docker-compose.build.yml` from the GitHub repo as expected.
-- Coolify interpolates `${SELF_UPDATE:-daily}` inside `labels:`, and doesn't override the container hostname (else self-ordering silently falls back to discovery order).
+- Coolify doesn't override the container hostname (else the updater can't find its own service: no self-update, no restart-last ordering).
 
 ## Status
 It is published as `ghcr.io/kimtholstorf/coolify-watchtower` and runs on a real Coolify (v4.3.23) with `DRY_RUN=false`. It has updated one service opted in through a scheduled task.

@@ -27,7 +27,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 
 
 def env_bool(name, default):
@@ -43,6 +43,9 @@ DEFAULT_SCHEDULE = os.environ.get("DEFAULT_SCHEDULE", "daily").strip()
 DRY_RUN = env_bool("DRY_RUN", "false")
 REPORT_ON_START = env_bool("REPORT_ON_START", "true")
 NOTIFY_URL = os.environ.get("NOTIFY_URL", "").strip()
+# Schedule for updating the updater's own service ("false" turns it off). Handled in code, not
+# with a label, because Coolify doesn't interpolate variables inside compose labels.
+SELF_UPDATE = os.environ.get("SELF_UPDATE", "daily").strip()
 # Empty TZ: each service follows its server's timezone from Coolify (Servers -> General).
 TZ_OVERRIDE = os.environ.get("TZ", "").strip()
 # Touched every loop; the container health check fails if it goes stale.
@@ -273,13 +276,15 @@ def discover():
                     "timezone": tz_for(uuid),
                 }
 
+    try:
+        containers = docker_get("/containers/json")
+    except Exception as e:
+        log(f"WARN container discovery: {e}")
+        containers = []
+    me = own_service(containers, names)
+
     ignored = []
     if AUTO_UPDATE_LABEL:
-        try:
-            containers = docker_get("/containers/json")
-        except Exception as e:
-            log(f"WARN label discovery: {e}")
-            containers = []
         for c in containers:
             labels = c.get("Labels") or {}
             if AUTO_UPDATE_LABEL not in labels:
@@ -288,11 +293,18 @@ def discover():
             if not uuid:
                 ignored.append((c.get("Names") or ["?"])[0].lstrip("/"))
                 continue
-            if uuid in found:
+            if uuid in found or uuid == me:  # our own schedule comes from SELF_UPDATE
                 continue
             frequency, enabled = label_schedule(labels[AUTO_UPDATE_LABEL])
             found[uuid] = {"name": names[uuid], "frequency": frequency, "enabled": enabled, "source": "label",
                            "timezone": tz_for(uuid)}
+
+    if me and me not in found:
+        frequency, enabled = label_schedule(SELF_UPDATE)
+        found[me] = {"name": names[me], "frequency": frequency, "enabled": enabled, "source": "self",
+                     "timezone": tz_for(me)}
+    if me in found:
+        found[me]["self"] = True
     return found, sorted(ignored)
 
 
@@ -324,6 +336,15 @@ def docker_get(path):
     if st != 200:
         raise RuntimeError(f"docker GET {path} -> HTTP {st}")
     return json.loads(body)
+
+
+def own_service(containers, uuids):
+    """The service uuid this updater runs in (Docker sets the hostname to the container ID), or None."""
+    host = socket.gethostname()
+    for c in containers:
+        if host and (c.get("Id") or "").startswith(host):
+            return owner_uuid(c, uuids)
+    return None
 
 
 def owner_uuid(container, uuids):
@@ -541,18 +562,6 @@ def print_table(found, ignored):
               f"{v['timezone']:<18}  {uuid}", flush=True)
 
 
-def own_service(uuids):
-    """The service uuid this updater runs in (Docker sets the hostname to the container ID), or None."""
-    host = socket.gethostname()
-    try:
-        for c in docker_get("/containers/json"):
-            if host and (c.get("Id") or "").startswith(host):
-                return owner_uuid(c, uuids)
-    except Exception:
-        pass
-    return None
-
-
 def tick(now, state):
     """Run one minute. `now` must be timezone-aware; each schedule is evaluated in its own timezone."""
     result = discover()
@@ -575,10 +584,8 @@ def tick(now, state):
             if key not in state.setdefault("bad", set()):
                 state["bad"].add(key)
                 log(f"[{cfg['name']}] WARN {e} - ignored")
-    if len(due) > 1:
-        # Restarting our own service kills this process, so do it last.
-        me = own_service(set(found))
-        due.sort(key=lambda uuid: uuid == me)
+    # Restarting our own service kills this process, so do it last.
+    due.sort(key=lambda uuid: found[uuid].get("self", False))
     for uuid in due:
         cfg = found[uuid]
         log(f"[{cfg['name']}] schedule '{cfg['frequency']}' ({cfg['timezone']}) due - checking")
