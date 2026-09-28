@@ -32,12 +32,12 @@ The repo goes on GitHub (`KimTholstorf/coolify-watchtower`). CI builds a multi-a
 - **Standard library only.** No dependencies, so the image is just `python:3.13-alpine` plus `tzdata`.
 - **Docker access is read-only.** It goes through `tecnativa/docker-socket-proxy` with `CONTAINERS=1 IMAGES=1 POST=0`. The updater must never write to Docker; all changes go through the Coolify API.
 - **Only the updater joins the `coolify` network** (external network in the compose files); the socket proxy stays on the stack's private network. Read-only access still exposes every container's env vars, so the proxy must not be reachable from other stacks. Never tell users to enable Connect to Predefined Network, which would attach both services.
-- **`DRY_RUN` defaults to true.**
+- **Sensible defaults, only `COOLIFY_TOKEN` required.** `DRY_RUN` defaults to false (opting a service in is the consent; the startup report never restarts), `SELF_UPDATE` to `daily`.
 - The per-service task runs `true` inside a container of that service, so the chosen container needs a shell. Failures show up in Coolify under Settings → Scheduled Jobs → Failures.
 
 ## Design decisions and rejected alternatives
 - **Prefer the image over the compose file.** Coolify keeps each user's pasted compose file (and one-click services keep the template as it was when created), so compose changes only reach users who re-paste by hand, while image changes arrive with Pull Latest or self-update. Put behaviour in code or the `Dockerfile` (defaults, the updater's health check); change the compose files only when unavoidable and call it out in release notes.
-- **Self-update** is the `coolify.auto-update=${SELF_UPDATE:-false}` label on the updater's own compose service. Only works for the pasted-compose (service) install, not the Git/build (application) one. When several services are due in one minute, `own_service()` finds our container (hostname == container ID prefix) and restarts our service last.
+- **Self-update** is the `coolify.auto-update=${SELF_UPDATE:-daily}` label on the updater's own compose service (on by default). Only works for the pasted-compose (service) install, not the Git/build (application) one. When several services are due in one minute, `own_service()` finds our container (hostname == container ID prefix) and restarts our service last.
 - **Watchtower (nicholas-fedor fork)** was rejected. It recreates containers behind Coolify's back, isn't compose-aware, needs a writable socket, and updates don't appear in Coolify's deployment history.
 - **Per-service tasks that call the API themselves** were rejected: every container would need curl, network access to Coolify, and a token, and a task would restart its own container.
 - **Host cron** was rejected because it isn't visible in the Coolify UI.
@@ -48,10 +48,10 @@ The repo goes on GitHub (`KimTholstorf/coolify-watchtower`). CI builds a multi-a
 - Coolify's schedule words map as `daily` = `0 0 * * *`, `weekly` = `0 0 * * 0`, and so on (`CRON_ALIASES`).
 - Coolify keeps user-defined labels such as `coolify.auto-update` from a service's compose file when it adds its own labels, and the compose project stays the service uuid.
 - Coolify's Docker Compose build pack builds `docker-compose.build.yml` from the GitHub repo as expected.
-- Coolify interpolates `${SELF_UPDATE:-false}` inside `labels:`, and doesn't override the container hostname (else self-ordering silently falls back to discovery order).
+- Coolify interpolates `${SELF_UPDATE:-daily}` inside `labels:`, and doesn't override the container hostname (else self-ordering silently falls back to discovery order).
 
 ## Status
-v1 is published as `ghcr.io/kimtholstorf/coolify-watchtower` and runs on a real Coolify (v4.3.23) with `DRY_RUN=false`. It has updated one service opted in through a scheduled task.
+It is published as `ghcr.io/kimtholstorf/coolify-watchtower` and runs on a real Coolify (v4.3.23) with `DRY_RUN=false`. It has updated one service opted in through a scheduled task.
 
 Verified:
 - Offline tests (cron, image refs, labels, notification payloads, one full tick against mocked Coolify and Docker).

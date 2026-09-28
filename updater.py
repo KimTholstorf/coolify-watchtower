@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""coolify-watchtower v1 - Coolify-native image auto-updater.
+"""coolify-watchtower - Coolify-native image auto-updater.
 
 A Coolify service opts in either with a Scheduled Task in its own tab named
 TASK_NAME (default "auto-update", command `true`), or with the container label
@@ -27,7 +27,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 
 
 def env_bool(name, default):
@@ -40,7 +40,7 @@ DOCKER_URL = os.environ.get("DOCKER_HOST", "tcp://socket-proxy:2375").replace("t
 TASK_NAME = os.environ.get("TASK_NAME", "auto-update").strip().lower()
 AUTO_UPDATE_LABEL = os.environ.get("AUTO_UPDATE_LABEL", "coolify.auto-update").strip()
 DEFAULT_SCHEDULE = os.environ.get("DEFAULT_SCHEDULE", "daily").strip()
-DRY_RUN = env_bool("DRY_RUN", "true")
+DRY_RUN = env_bool("DRY_RUN", "false")
 REPORT_ON_START = env_bool("REPORT_ON_START", "true")
 NOTIFY_URL = os.environ.get("NOTIFY_URL", "").strip()
 # Empty TZ: each service follows its server's timezone from Coolify (Servers -> General).
@@ -620,7 +620,7 @@ def main():
 
     apps = discover_unsupported_apps()
     if apps:
-        log(f"WARN '{TASK_NAME}' tasks on applications are not supported in v1 (services only): {', '.join(apps)}")
+        log(f"WARN '{TASK_NAME}' tasks on applications are not supported (services only): {', '.join(apps)}")
 
     state = {}
     beat()

@@ -1,4 +1,4 @@
-# coolify-watchtower v1
+# coolify-watchtower
 
 Automatic image updates for Coolify services, similar to Watchtower, except that Coolify does the actual update through its own API. This service only decides when to trigger it. It isn't based on Watchtower and isn't affiliated with Coolify.
 
@@ -23,13 +23,13 @@ You can follow what happens in several places:
 2. Deploy it: + New Resource → Docker Compose (empty), then paste `docker-compose.yml`. It pulls `ghcr.io/kimtholstorf/coolify-watchtower:latest`.
 
    If you'd rather build from source, connect GitHub through Coolify's [GitHub App source](https://coolify.io/docs/applications/sources/github/app), create a resource from this repo, choose the Docker Compose build pack and set Docker Compose Location to `/docker-compose.build.yml`. Coolify treats that as an application, so the self-update below won't work there; each push to the repo redeploys it instead.
-3. Set the environment variables:
+3. Set the environment variables. Only `COOLIFY_TOKEN` is required; the rest have defaults that work out of the box:
    - `COOLIFY_TOKEN`: the token.
    - `COOLIFY_URL`: defaults to `http://coolify:8080`. The compose file connects the updater (and only the updater) to Coolify's `coolify` network, so leave Connect to Predefined Network off. That setting would also put the socket proxy on the shared network, where any container could read other containers' environment variables through it.
    - `TZ` (optional): leave it empty. The updater then reads each server's Server Timezone from Coolify (Servers → General) and evaluates schedules in it, just like Coolify does when it runs the task. Setting `TZ` forces one timezone for every service.
-   - `DRY_RUN`: `true` by default. Set it to `false` once the logs look right.
+   - `DRY_RUN` (optional): `false` by default. Set it to `true` to only report available updates without restarting anything.
    - `AUTO_UPDATE_LABEL` and `DEFAULT_SCHEDULE` (optional): the label name (default `coolify.auto-update`) and the schedule used when the label's value is `true` (default `daily`).
-   - `SELF_UPDATE` (optional): a schedule such as `0 5 * * *` or `daily` to let the updater update itself, like any other opted-in service. The default is `false`. See [Updating](#updating).
+   - `SELF_UPDATE` (optional): when the updater updates itself. The default is `daily` (midnight in the server's timezone). Use a cron such as `0 5 * * *` for another time, or `false` to turn it off. See [Updating](#updating).
    - `NOTIFY_URL` (optional): where to send a message when an update is queued, fails, or would run in dry-run mode. This can be a Discord webhook URL (`https://discord.com/api/webhooks/...`), an ntfy topic URL, or any endpoint that accepts a plain-text POST. Coolify's API can't send messages to the Discord channel you set up in Coolify, but you can create a second webhook in the same channel under Channel settings → Integrations → Webhooks and use its URL here.
 4. Opt a service in. On that service, go to Scheduled Tasks → New and enter:
    - Name: `auto-update`
@@ -47,13 +47,13 @@ You can follow what happens in several places:
 
 ## Updating
 
-Set `SELF_UPDATE` and the updater pulls its own new images on that schedule. If other services are due in the same minute, it restarts itself last. You can also update it by hand with Pull Latest Images & Restart in Coolify.
+The updater pulls its own new images on the `SELF_UPDATE` schedule, daily by default. If other services are due in the same minute, it restarts itself last. You can also update it by hand with Pull Latest Images & Restart in Coolify.
 
 Either way, only the image gets updated. Coolify keeps the compose file you pasted and never replaces it, so this project keeps its compose file stable and puts changes in the image instead. When a release does need a compose change, its release notes say so, and you copy the new `docker-compose.yml` into Edit Compose File.
 
 ## Behaviour and limits
 
-- v1 supports services (compose and one-click) only. The startup report lists `auto-update` tasks and `coolify.auto-update` labels on applications, but the updater otherwise ignores them.
+- Only services (compose and one-click) are supported. The startup report lists `auto-update` tasks and `coolify.auto-update` labels on applications, but the updater otherwise ignores them.
 - The updater skips images pinned by digest and images built locally.
 - Logs and notifications name versions (`mauriceboe/trek:latest 4.3.1 -> 4.3.3`) by finding the version tag that points at the same image. If no such tag exists, they show short digests instead.
 - It only works with public registries, such as Docker Hub and ghcr.io, because it uses the anonymous token flow.
