@@ -1,8 +1,12 @@
 """Pixel-art lighthouse logo: 24x24 grid, one char per pixel, rendered as merged SVG rects.
 
 Usage: python3 assets/make_logo.py assets/logo.svg && python3 assets/make_logo.py assets/logo-icon.svg --disc
+A .png output path writes a transparent PNG instead, scaled with --scale N (default 10, i.e. 240x240):
+       python3 assets/make_logo.py assets/logo-icon.png --disc --scale 10
 """
+import struct
 import sys
+import zlib
 
 GRID = """
 ........................
@@ -65,6 +69,26 @@ if DISC:
         )
         for y, row in enumerate(rows)
     ]
+
+out = sys.argv[1]
+if out.endswith(".png"):
+    scale = int(sys.argv[sys.argv.index("--scale") + 1]) if "--scale" in sys.argv else 10
+    raw = b""
+    for row in rows:
+        line = b"".join(
+            (bytes.fromhex(PALETTE[c][1:]) + b"\xff" if c != "." else b"\x00\x00\x00\x00") * scale for c in row
+        )
+        raw += (b"\x00" + line) * scale  # filter byte 0 per scanline
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    size = 24 * scale
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+    open(out, "wb").write(png)
+    print(f"{size}x{size} png")
+    sys.exit()
 
 rects = []
 for y, row in enumerate(rows):

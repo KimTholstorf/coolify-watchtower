@@ -186,7 +186,7 @@ The image is published in two places:
 | GitHub | `ghcr.io/kimtholstorf/coolify-watchtower` (used by `docker-compose.yml`) |
 | Docker Hub | `kimtholstorf/coolify-watchtower` |
 
-Both carry the same images: `latest` is always the newest release, and version tags such as `1.6.1`, `1.6` and `1` pin a release. To use Docker Hub instead, change the `image:` line in the compose file to `kimtholstorf/coolify-watchtower:latest`.
+Both carry the same images: `latest` is always the newest release, and version tags such as `1.6.1`, `1.6` and `1` pin a release. To pull from Docker Hub instead, paste [`docker-compose.dockerhub.yml`](docker-compose.dockerhub.yml) rather than `docker-compose.yml`. The two are identical apart from the image line.
 
 ## Security
 
