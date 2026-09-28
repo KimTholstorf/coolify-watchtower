@@ -1,0 +1,53 @@
+name: dockerhub
+
+# Copies each version-tagged release from ghcr.io to Docker Hub once the image workflow has
+# built and pushed it. The copy is by digest, so both registries serve the exact same image.
+# Needs repository variable DOCKERHUB_USERNAME and secret DOCKERHUB_TOKEN (read & write).
+on:
+  workflow_run:
+    workflows: [image]
+    types: [completed]
+  # Manual run from the Actions tab, e.g. for a release made before this workflow existed.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to copy, e.g. v1.6.1"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  copy:
+    if: >-
+      github.event_name == 'workflow_dispatch' || (
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Copy release to Docker Hub
+        env:
+          REF: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+          SRC: ghcr.io/${{ github.repository }}
+          DST: docker.io/${{ vars.DOCKERHUB_USERNAME }}/coolify-watchtower
+        run: |
+          # Only release tags like v1.6.1; pushes to main and pre-releases are skipped.
+          if ! [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Not a release tag: $REF - nothing to copy."
+            exit 0
+          fi
+          version="${REF#v}"
+          src="$(echo "$SRC" | tr '[:upper:]' '[:lower:]'):$version"
+          docker buildx imagetools create \
+            --tag "$DST:$version" \
+            --tag "$DST:${version%.*}" \
+            --tag "$DST:${version%%.*}" \
+            --tag "$DST:latest" \
+            "$src"
+          docker buildx imagetools inspect "$DST:$version"
