@@ -41,7 +41,14 @@ flowchart LR
 
 In Coolify's settings, set **API access** to Enabled (under API and MCP). Then create a token under **Keys & Tokens → API tokens** with the `read` and `deploy` permissions. You must be an admin or owner of the team, because Coolify rejects `deploy` tokens from ordinary members.
 
-<!-- screenshot: token creation with read + deploy ticked -->
+> [!TIP]
+> Turning on API access opens Coolify's API to any address with a valid token. You can limit it to coolify-watchtower with **Allowed API IPs**, next to the API access setting. coolify-watchtower talks to Coolify over Docker's `coolify` network, so find that network's address ranges on the server:
+>
+> ```bash
+> docker network inspect coolify --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}'
+> ```
+>
+> Enter what it prints, e.g. `10.0.1.0/24, fd12:3456:789a::/64`. Include the IPv6 range if there is one, since requests can arrive over either. If you also use the API from your own machine, add its IP too.
 
 ### 2. Deploy coolify-watchtower
 
@@ -58,14 +65,14 @@ Open a service you want kept up to date, go to **Scheduled Tasks → New**, and 
 |---|---|
 | Name | `auto-update` |
 | Command | `true` |
-| Frequency | `30 4 * * *`, or `daily`, `weekly` |
+| Frequency | a cron schedule such as `30 4 * * *` (every day at 04:30), or `daily`, `weekly` |
 | Container | any container in the service that has `sh` |
 
-<!-- screenshot: the auto-update scheduled task on a service -->
+The frequency uses cron syntax, the same as every scheduled task in Coolify, i.e. five fields for minute, hour, day of month, month and day of week. Avoid headaches and use [croncalculator.com](https://croncalculator.com/) to build one for you.
 
 ### 4. Check the logs
 
-Open coolify-watchtower's logs. Within a minute you'll see your service in the table, and at the scheduled time the result of each check:
+Open coolify-watchtower's Runtime logs and expand Updater. Within a minute you'll see your service in the table, and at the scheduled time the result of each check:
 
 ```text
 coolify-watchtower 1.6.1 | coolify=http://coolify:8080 ... tz=from Coolify servers dry_run=False
@@ -73,9 +80,9 @@ Coolify API OK (version 4.3.23)
 Docker (socket proxy) OK
 Services with 'auto-update' task or 'coolify.auto-update' label:
     coolify-watchtower  enabled   self   daily           Europe/Copenhagen   udgv5xuy2niy...
-    my-app              enabled   task   30 4 * * *      Europe/Copenhagen   c92huq7by0wp...
-[my-app] app-c92huq7by0wp...: mauriceboe/trek:latest UPDATE 4.3.1 -> 4.3.3 (819bee7d6b15 -> 1ef1ccf41af8)
-[my-app] update available (report only, no restart)
+    uptime-kuma         enabled   task   30 4 * * *      Europe/Copenhagen   c92huq7by0wp...
+[uptime-kuma] uptime-kuma-c92huq7by0wp...: louislam/uptime-kuma:2 UPDATE 2.5.4 -> 2.5.5 (917318f9d7be -> c74379ac4509)
+[uptime-kuma] update available (report only, no restart)
 Startup report done. Waiting for schedules.
 ```
 
@@ -83,32 +90,56 @@ The check at startup only reports. Updates happen at the scheduled times.
 
 ## Opting services in
 
-There are two ways. Use whichever suits the service.
+coolify-watchtower only updates services you opt in. There are two ways, and either one opts in the whole service, with all its containers.
 
-| | Scheduled task | Label |
+| | Coolify Scheduled Task | docker-compose label |
 |---|---|---|
-| Where | the service's Scheduled Tasks tab | the service's compose file |
-| Change the schedule | edit the task, takes effect within a minute | edit the label, then redeploy the service |
+| Set it up in | the service's Scheduled Tasks tab | the service's compose file |
+| Change the schedule | edit the task; takes effect within a minute | edit the label, then redeploy the service |
 | Pause | switch the task off | set the label to `false` |
-| Needs a shell in the container | yes, to run `true` | no |
+| Needs a shell in the container | yes | no |
 
-A label looks like this and goes on any container in the service:
+If a service has both, the scheduled task wins.
 
-```yaml
-labels:
-  - coolify.auto-update=30 4 * * *
-```
+### Coolify Scheduled Task
 
-Its value is a schedule, `true` for the default schedule (`daily`), or `false` to pause. If a service has both a task and a label, the task wins.
+This is the way shown in the [quick start](#3-opt-a-service-in). On the service, go to **Scheduled Tasks → New** and create a task named `auto-update` with the command `true`. The task's frequency is the update schedule, and its on/off switch pauses updates.
 
-Schedules are five-field cron expressions (numbers, `*`, ranges, lists and steps) or Coolify's words `hourly`, `daily`, `weekly`, `monthly` and `yearly`. They run in the timezone set for the server in Coolify (**Servers → General → Server Timezone**), the same as Coolify's own scheduled tasks.
+The command `true` does nothing. Coolify runs it at the scheduled time in the container you pick, which is why that container needs `sh`. coolify-watchtower only reads the task's settings.
 
 > [!TIP]
-> Coolify runs the `true` task at every scheduled time and may post "Scheduled task succeeded" to your notification channel each time. To keep the channel quiet, turn off the success notification for scheduled tasks under **Notifications** in Coolify, and keep the one for failures.
+> Coolify may post "Scheduled task succeeded" to your notification channel every time it runs the task. To keep the channel quiet, turn off the success notification for scheduled tasks under **Notifications** in Coolify, and keep the one for failures.
+
+### docker-compose label
+
+Open the service's **Edit Compose File**, add the label to any one of its containers, and redeploy the service:
+
+```yaml
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:2
+    labels:
+      - coolify.auto-update=30 4 * * *
+```
+
+| Label | Schedule |
+|---|---|
+| `coolify.auto-update=30 4 * * *` | a cron schedule, here every day at 04:30 |
+| `coolify.auto-update=weekly` | one of the words below |
+| `coolify.auto-update` or `coolify.auto-update=true` | the default, `daily` (set with `DEFAULT_SCHEDULE`) |
+| `coolify.auto-update=false` | paused |
+
+Docker only reads labels when it creates a container, so every change to the label needs a redeploy of the service.
+
+### Schedules
+
+Schedules use cron syntax, like all scheduled tasks in Coolify: five fields for minute, hour, day of month, month and day of week. Awoid headackes and use [croncalculator.com](https://croncalculator.com/) to build one for you. Coolify's words work too: `hourly`, `daily`, `weekly`, `monthly` and `yearly`, where `daily` means midnight.
+
+Schedules run in the timezone set for the server in Coolify (**Servers → General → Server Timezone**), the same as Coolify's own scheduled tasks.
 
 ## Settings
 
-Only `COOLIFY_TOKEN` is required.
+Only `COOLIFY_TOKEN` is required. `NOTIFY_URL` is highly recomended, unless you prefer keeping tabs on things via Coolify Runtime logs.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -128,8 +159,8 @@ Only `COOLIFY_TOKEN` is required.
 Set `NOTIFY_URL` and you get a message when an update is started, when a restart fails (with Coolify's reason), and, in dry-run mode, when an update is available.
 
 ```text
-coolify-watchtower: updating my-app
-mauriceboe/trek:latest 4.3.1 -> 4.3.3
+coolify-watchtower: updating uptime-kuma
+louislam/uptime-kuma:2 2.5.4 -> 2.5.5
 ```
 
 - **Discord:** create a webhook in the channel (**Channel settings → Integrations → Webhooks**) and use its URL. Coolify's API can't post to the Discord channel you set up inside Coolify, so coolify-watchtower needs its own webhook.
@@ -138,7 +169,7 @@ mauriceboe/trek:latest 4.3.1 -> 4.3.3
 
 <!-- screenshot: a Discord notification -->
 
-Versions such as `4.3.1 -> 4.3.3` come from the registry's tags. When no version tag matches an image, the message shows short digests instead.
+Versions such as `2.5.4 -> 2.5.5` come from the registry's tags. When no version tag matches an image, the message shows short digests instead.
 
 ## Keeping coolify-watchtower up to date
 
@@ -190,4 +221,4 @@ Tests run offline with `python3 tests/test_updater.py`. Design notes and the bac
 
 ---
 
-<sub>coolify-watchtower isn't based on Watchtower and isn't affiliated with Coolify or Watchtower.</sub>
+<sub>MIT licensed, see [LICENSE](LICENSE). coolify-watchtower isn't based on Watchtower and isn't affiliated with Coolify or Watchtower.</sub>
