@@ -24,8 +24,8 @@ The repo goes on GitHub (`KimTholstorf/coolify-watchtower`). CI builds a multi-a
 - `docker-compose.yml`: pulls the ghcr.io image. For pasting into Coolify and, later, the one-click template.
 - `docker-compose.build.yml`: the same, with `build: .`. Used when Coolify deploys from the GitHub repo. Keep the two in sync.
 - `assets/`: the pixel lighthouse logo. `make_logo.py` generates `logo.svg` (transparent) and `logo-icon.svg` (on a disc) from a text grid; `logo-icon.png` is a raster export.
-- `.github/workflows/image.yml`: runs the tests, then builds amd64+arm64 and pushes to ghcr.io on `main` (`latest`) and `v*` tags (semver). Pull requests build without pushing.
-- `.github/workflows/dockerhub.yml`: after `image` succeeds for a release tag `vX.Y.Z`, copies `ghcr.io/…:X.Y.Z` to Docker Hub by digest (`imagetools create`, no rebuild) as `X.Y.Z`, `X.Y`, `X` and `latest`. On Docker Hub `latest` = newest release; on ghcr.io `latest` = newest `main`. Can also be run by hand (Actions → dockerhub → Run workflow, with a tag) for older releases. Needs repo variable `DOCKERHUB_USERNAME` and secret `DOCKERHUB_TOKEN`. Not yet run.
+- `.github/workflows/image.yml`: runs the tests on every push and pull request. Only for release tags `vX.Y.Z` does it build amd64+arm64 and push to ghcr.io as `X.Y.Z`, `X.Y`, `X` and `latest`, so `latest` is always the newest release. Releasing = pushing a tag.
+- `.github/workflows/dockerhub.yml`: after `image` succeeds for a release tag `vX.Y.Z`, copies `ghcr.io/…:X.Y.Z` to Docker Hub by digest (`imagetools create`, no rebuild) as `X.Y.Z`, `X.Y`, `X` and `latest`. Both registries carry the same tags and digests. Can also be run by hand (Actions → dockerhub → Run workflow, with a tag) for older releases. Needs repository variable (not secret) `DOCKERHUB_USERNAME` and repository secret `DOCKERHUB_TOKEN`. Published as `docker.io/kimtholstorf/coolify-watchtower`; verified with 1.6.1 (same digest as ghcr.io).
 - `tests/test_updater.py`: offline tests covering cron, image refs, and one full tick against mocked Coolify and Docker HTTP servers. Run with `python3 tests/test_updater.py`.
 - `README.md`: user-facing setup.
 
