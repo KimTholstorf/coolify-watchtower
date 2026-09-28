@@ -17,6 +17,9 @@ services:
       - REPORT_ON_START=${REPORT_ON_START:-true}
       - NOTIFY_URL=${NOTIFY_URL:-}
       - DOCKER_HOST=tcp://socket-proxy:2375
+    labels:
+      # Lets the updater update itself. Set SELF_UPDATE to a schedule (e.g. "0 5 * * *" or "daily").
+      - coolify.auto-update=${SELF_UPDATE:-false}
     networks:
       - default
       - coolify

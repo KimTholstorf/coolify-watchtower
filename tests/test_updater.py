@@ -34,6 +34,11 @@ assert len(json.loads(u.notify_request("https://discord.com/api/webhooks/1/a", "
 h, b = u.notify_request("https://ntfy.sh/topic", "t", "body")
 assert h["Title"] == "t" and h["Content-Type"] == "text/plain" and b == b"body"
 assert u.notify_request("https://example.com/?next=https://discord.com/api/webhooks/1/a", "t", "x")[0]["Content-Type"] == "text/plain"
+# version tags
+assert u.best_version_tag(["latest", "4", "4.3.3"]) == "4.3.3"
+assert u.best_version_tag(["latest", "main"]) is None
+assert u.best_version_tag(["v2.1.0", "v2.1"]) == "v2.1.0"
+assert u.best_version_tag(["1.0.0-rc.1", "1.0.0"]) == "1.0.0"
 print("unit ok")
 
 restarts=[]
@@ -67,6 +72,7 @@ class H(BaseHTTPRequestHandler):
 for port in (18080,12375):
     threading.Thread(target=HTTPServer(("127.0.0.1",port),H).serve_forever,daemon=True).start()
 u.remote_digest = lambda *a: "sha256:bbbbbbbbbbbbbbbbbb"
+u.tag_versions = lambda registry, repo, digests: {"sha256:bbbbbbbbbbbbbbbbbb": "2.1.0"} if "uptime" in repo else {}
 st={}
 found, ignored = u.discover()
 assert found["svc1"]["source"]=="task" and found["svc1"]["enabled"]  # task wins over label=false
@@ -74,7 +80,9 @@ assert found["svc3"]=={"name":"vaultwarden","frequency":"*/5 * * * *","enabled":
 assert found["svc4"]["frequency"]=="daily" and "svc2" in found
 assert ignored==["myapp-app1"]
 CPH = u.zone("Europe/Copenhagen")
-u.tick(datetime(2026,9,27,4,30,tzinfo=CPH), st)  # svc1 task + svc3 label due; svc4 (daily) not
+u.socket.gethostname = lambda: "c1"  # we run in svc1's container, so svc1 restarts last
+u.tick(datetime(2026,9,27,4,30,tzinfo=CPH), st)
+assert restarts==["/api/v1/services/svc3/restart?latest=true","/api/v1/services/svc1/restart?latest=true"], restarts  # svc1 task + svc3 label due; svc4 (daily) not
 print("restarts:", restarts)
 assert sorted(restarts)==["/api/v1/services/svc1/restart?latest=true","/api/v1/services/svc3/restart?latest=true"]
 u.tick(datetime(2026,9,27,4,31,tzinfo=CPH), st)
@@ -92,5 +100,6 @@ assert "/api/v1/services/svc1/restart?latest=true" in restarts
 restarts.clear()
 u.tick(datetime(2026,9,27,4,30,tzinfo=UTC), {})  # 06:30 in Copenhagen: svc1 not due
 assert "/api/v1/services/svc1/restart?latest=true" not in restarts
+assert u.describe_change("docker.io", "louislam/uptime-kuma", {"sha256:aaaaaaaaaaaaaaaa"}, "sha256:bbbbbbbbbbbbbbbbbb") == "aaaaaaaaaaaa -> 2.1.0"
 print("apps:", u.discover_unsupported_apps())
 print("harness ok")

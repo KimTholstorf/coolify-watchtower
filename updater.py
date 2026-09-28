@@ -15,6 +15,7 @@ Stdlib only.
 import json
 import os
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -26,7 +27,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.4.2"
+VERSION = "1.5.0"
 
 
 def env_bool(name, default):
@@ -376,22 +377,91 @@ def _registry_token(challenge):
     return data.get("token") or data.get("access_token")
 
 
-def remote_digest(registry, repo, tag):
+def registry_request(method, registry, path, headers=None):
+    """Request against a registry's /v2 API, doing the anonymous bearer-token flow on 401."""
     host = "registry-1.docker.io" if registry == "docker.io" else registry
-    url = f"https://{host}/v2/{repo}/manifests/{tag}"
-    headers = {"Accept": ACCEPT_MANIFESTS}
-    st, h, _ = http("HEAD", url, headers)
+    url = f"https://{host}/v2/{path}"
+    headers = dict(headers or {})
+    st, h, body = http(method, url, headers)
     if st == 401:
         token = _registry_token(h.get("WWW-Authenticate", ""))
         if token:
             headers["Authorization"] = f"Bearer {token}"
-            st, h, _ = http("HEAD", url, headers)
+            st, h, body = http(method, url, headers)
+    return st, h, body
+
+
+def remote_digest(registry, repo, tag):
+    st, h, _ = registry_request("HEAD", registry, f"{repo}/manifests/{tag}", {"Accept": ACCEPT_MANIFESTS})
     if st != 200:
         raise RuntimeError(f"registry HTTP {st} (private registry or missing tag?)")
     digest = h.get("Docker-Content-Digest")
     if not digest:
         raise RuntimeError("registry returned no Docker-Content-Digest")
     return digest
+
+
+VERSION_TAG = re.compile(r"v?\d+(\.\d+)*([-+][0-9A-Za-z.-]+)?")
+
+
+def best_version_tag(tags):
+    """The most specific version-looking tag: '4.3.3' over '4', and never 'latest'."""
+    candidates = [t for t in tags if VERSION_TAG.fullmatch(t)]
+    if not candidates:
+        return None
+    def key(t):
+        core = t.lstrip("v").split("-", 1)[0].split("+", 1)[0]
+        nums = [int(x) for x in core.split(".")]
+        return (len(nums), "-" not in t, nums)  # more parts first, releases over pre-releases
+    return max(candidates, key=key)
+
+
+def tag_versions(registry, repo, digests):
+    """{digest: version tag} for the given digests, found by matching tags to digests. Best effort."""
+    by_digest = {}
+    if registry == "docker.io":
+        # Docker Hub's own API lists tags with their digests in one request.
+        url = f"https://hub.docker.com/v2/repositories/{repo}/tags?page_size=100&ordering=last_updated"
+        st, _, body = http("GET", url, {"User-Agent": f"coolify-watchtower/{VERSION}"})
+        if st == 200:
+            for t in json.loads(body).get("results") or []:
+                if t.get("digest"):
+                    by_digest.setdefault(t["digest"], []).append(t["name"])
+    else:
+        tags, path = [], f"{repo}/tags/list?n=1000"
+        for _ in range(20):  # follow Link pagination; signature tags can fill many pages
+            st, h, body = registry_request("GET", registry, path)
+            if st != 200:
+                break
+            tags += [t for t in json.loads(body).get("tags") or [] if VERSION_TAG.fullmatch(t)]
+            link = re.search(r"<(?:https?://[^/]+)?/v2/([^>]+)>;\s*rel=\"?next", h.get("Link") or "")
+            if not link:
+                break
+            path = link.group(1)
+        if tags:
+            tags.sort(key=lambda t: [int(x) for x in re.findall(r"\d+", t)], reverse=True)
+            for t in tags[:30]:  # newest versions only, one HEAD request each
+                try:
+                    by_digest.setdefault(remote_digest(registry, repo, t), []).append(t)
+                except Exception:
+                    continue
+    result = {}
+    for d in digests:
+        tag = best_version_tag(by_digest.get(d, []))
+        if tag:
+            result[d] = tag
+    return result
+
+
+def describe_change(registry, repo, local, remote):
+    """'4.3.1 -> 4.3.3' when versions can be found, else short digests."""
+    try:
+        names = tag_versions(registry, repo, set(local) | {remote})
+    except Exception:
+        names = {}
+    old = next((names[d] for d in sorted(local) if d in names), None) or short(sorted(local)[0])
+    new = names.get(remote) or short(remote)
+    return f"{old} -> {new}"
 
 
 # ---------------------------------------------------------------- core
@@ -429,8 +499,10 @@ def check_service(uuid, cfg, allow_restart):
             if remote in local:
                 log(f"[{name}] {cname}: {ref} up to date ({short(remote)})")
             else:
-                log(f"[{name}] {cname}: {ref} UPDATE {short(sorted(local)[0])} -> {short(remote)}")
-                changed.append(f"{ref} {short(sorted(local)[0])} -> {short(remote)}")
+                change = describe_change(parsed[0], parsed[1], local, remote)
+                digests = f"{short(sorted(local)[0])} -> {short(remote)}"
+                log(f"[{name}] {cname}: {ref} UPDATE {change}" + (f" ({digests})" if change != digests else ""))
+                changed.append(f"{ref} {change}")
         except Exception as e:
             log(f"[{name}] {cname}: ERROR {e}")
 
@@ -469,6 +541,18 @@ def print_table(found, ignored):
               f"{v['timezone']:<18}  {uuid}", flush=True)
 
 
+def own_service(uuids):
+    """The service uuid this updater runs in (Docker sets the hostname to the container ID), or None."""
+    host = socket.gethostname()
+    try:
+        for c in docker_get("/containers/json"):
+            if host and (c.get("Id") or "").startswith(host):
+                return owner_uuid(c, uuids)
+    except Exception:
+        pass
+    return None
+
+
 def tick(now, state):
     """Run one minute. `now` must be timezone-aware; each schedule is evaluated in its own timezone."""
     result = discover()
@@ -479,20 +563,26 @@ def tick(now, state):
     if fingerprint != state.get("fingerprint"):
         state["fingerprint"] = fingerprint
         print_table(found, ignored)
+    due = []
     for uuid, cfg in found.items():
         if not cfg["enabled"]:
             continue
         try:
-            due = cron_match(cfg["frequency"], now.astimezone(zone(cfg["timezone"])))
+            if cron_match(cfg["frequency"], now.astimezone(zone(cfg["timezone"]))):
+                due.append(uuid)
         except ValueError as e:
             key = (uuid, cfg["frequency"])
             if key not in state.setdefault("bad", set()):
                 state["bad"].add(key)
                 log(f"[{cfg['name']}] WARN {e} - ignored")
-            continue
-        if due:
-            log(f"[{cfg['name']}] schedule '{cfg['frequency']}' ({cfg['timezone']}) due - checking")
-            check_service(uuid, cfg, allow_restart=True)
+    if len(due) > 1:
+        # Restarting our own service kills this process, so do it last.
+        me = own_service(set(found))
+        due.sort(key=lambda uuid: uuid == me)
+    for uuid in due:
+        cfg = found[uuid]
+        log(f"[{cfg['name']}] schedule '{cfg['frequency']}' ({cfg['timezone']}) due - checking")
+        check_service(uuid, cfg, allow_restart=True)
 
 
 def main():
