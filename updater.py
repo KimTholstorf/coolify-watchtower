@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """coolify-watchtower - Coolify-native image auto-updater.
 
-A Coolify service opts in either with a Scheduled Task in its own tab named
+A Coolify service or Docker Image application opts in either with a Scheduled Task named
 TASK_NAME (default "auto-update", command `true`), or with the container label
 AUTO_UPDATE_LABEL (default "coolify.auto-update") in its compose file, whose
 value is the schedule. The task wins if both exist.
 This service reads tasks via the Coolify API and labels via Docker, and when one is due it
 compares local image digests (read-only Docker via socket proxy) with the
 registry. Only if something changed does it call Coolify's
-`restart?latest=true`, so Coolify itself performs the update.
+`restart?latest=true` (services) or `/deploy` (Docker Image applications), so Coolify
+itself performs the update.
 
 Stdlib only.
 """
@@ -27,7 +28,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.6.1"
+VERSION = "1.7.0"
 
 
 def env_bool(name, default):
@@ -249,6 +250,13 @@ def discover():
         return None
     names = {s["uuid"]: s.get("name") or s["uuid"] for s in services if s.get("uuid")}
     server_of = {s["uuid"]: s.get("server_id") for s in services if s.get("uuid")}
+    kind = {uuid: "service" for uuid in names}
+    # Docker Image applications: Coolify's /deploy pulls their image (other build packs would rebuild).
+    st, apps = coolify("GET", "/applications")
+    for a in apps if st == 200 and isinstance(apps, list) else []:
+        if a.get("uuid") and a.get("build_pack") == "dockerimage":
+            names[a["uuid"]] = a.get("name") or a["uuid"]
+            kind[a["uuid"]] = "application"
 
     tzs = {}
     if not TZ_OVERRIDE:
@@ -258,12 +266,15 @@ def discover():
             tzs = {}
         set_log_tz(tzs)
 
+    single_tz = next(iter(set(tzs.values()))) if len(set(tzs.values())) == 1 else None
+
     def tz_for(uuid):
-        return TZ_OVERRIDE or tzs.get(server_of.get(uuid)) or "UTC"
+        # Applications don't expose their server to a read token; fall back to the one shared timezone.
+        return TZ_OVERRIDE or tzs.get(server_of.get(uuid)) or single_tz or "UTC"
 
     found = {}
     for uuid, name in names.items():
-        st, tasks = coolify("GET", f"/services/{uuid}/scheduled-tasks")
+        st, tasks = coolify("GET", f"/{kind[uuid]}s/{uuid}/scheduled-tasks")
         if st != 200 or not isinstance(tasks, list):
             continue
         for t in tasks:
@@ -274,6 +285,7 @@ def discover():
                     "enabled": bool(t.get("enabled", True)),
                     "source": "task",
                     "timezone": tz_for(uuid),
+                    "kind": kind[uuid],
                 }
 
     try:
@@ -297,23 +309,26 @@ def discover():
                 continue
             frequency, enabled = label_schedule(labels[AUTO_UPDATE_LABEL])
             found[uuid] = {"name": names[uuid], "frequency": frequency, "enabled": enabled, "source": "label",
-                           "timezone": tz_for(uuid)}
+                           "timezone": tz_for(uuid), "kind": kind[uuid]}
 
     if me and me not in found:
         frequency, enabled = label_schedule(SELF_UPDATE)
         found[me] = {"name": names[me], "frequency": frequency, "enabled": enabled, "source": "self",
-                     "timezone": tz_for(me)}
+                     "timezone": tz_for(me), "kind": kind[me]}
     if me in found:
         found[me]["self"] = True
     return found, sorted(ignored)
 
 
 def discover_unsupported_apps():
+    """Names of non-Docker-Image applications that carry an auto-update task (reported, not updated)."""
     st, apps = coolify("GET", "/applications")
     if st != 200 or not isinstance(apps, list):
         return []
     names = []
     for a in apps:
+        if a.get("build_pack") == "dockerimage":
+            continue  # supported
         st, tasks = coolify("GET", f"/applications/{a.get('uuid')}/scheduled-tasks")
         if st == 200 and isinstance(tasks, list):
             if any((t.get("name") or "").strip().lower() == TASK_NAME for t in tasks):
@@ -321,8 +336,10 @@ def discover_unsupported_apps():
     return names
 
 
-def restart_service(uuid):
-    path = f"/services/{uuid}/restart?latest=true"
+def restart_resource(uuid, kind):
+    """Have Coolify pull the latest images and restart: services via restart?latest=true,
+    Docker Image applications via /deploy (which pulls, and does a rolling update)."""
+    path = f"/services/{uuid}/restart?latest=true" if kind == "service" else f"/deploy?uuid={uuid}"
     st, data = coolify("POST", path)
     if st == 405:  # Coolify < 4.2.0 used GET
         st, data = coolify("GET", path)
@@ -348,13 +365,15 @@ def own_service(containers, uuids):
 
 
 def owner_uuid(container, uuids):
-    """The service uuid (from uuids) a container belongs to: compose project == uuid, or name suffix."""
+    """The resource uuid (from uuids) a container belongs to: compose project == uuid, a service
+    container named `<name>-<uuid>`, or an application container named `<uuid>` / `<uuid>-<timestamp>`."""
     project = (container.get("Labels") or {}).get("com.docker.compose.project")
     if project in uuids:
         return project
     for n in container.get("Names") or []:
+        n = n.lstrip("/")
         for uuid in uuids:
-            if n.lstrip("/").endswith("-" + uuid):
+            if n == uuid or n.endswith("-" + uuid) or n.startswith(uuid + "-"):
                 return uuid
     return None
 
@@ -533,32 +552,35 @@ def check_service(uuid, cfg, allow_restart):
     if not allow_restart:
         log(f"[{name}] update available (report only, no restart)")
         return
+    kind = cfg.get("kind", "service")
+    action = "restart?latest=true" if kind == "service" else "deploy"
     if DRY_RUN:
-        log(f"[{name}] DRY_RUN - would call restart?latest=true")
+        log(f"[{name}] DRY_RUN - would call {action}")
         notify(f"coolify-watchtower (dry run): {name}", summary)
         return
-    st, data = restart_service(uuid)
+    st, data = restart_resource(uuid, kind)
     if st in (200, 201, 202):
-        log(f"[{name}] restart?latest=true queued")
+        log(f"[{name}] {action} queued")
         notify(f"coolify-watchtower: updating {name}", summary)
     else:
-        log(f"[{name}] ERROR restart HTTP {st} {data}")
+        log(f"[{name}] ERROR {action} HTTP {st} {data}")
         reason = data.get("message") if isinstance(data, dict) else data
         notify(f"coolify-watchtower: FAILED {name}", f"HTTP {st}: {reason}\n{summary}")
 
 
 def print_table(found, ignored):
     if ignored:
-        log(f"WARN label '{AUTO_UPDATE_LABEL}' on containers outside Coolify services "
-            f"(applications are not supported) - ignored: {', '.join(ignored)}")
+        log(f"WARN label '{AUTO_UPDATE_LABEL}' on containers outside services and Docker Image "
+            f"applications - ignored: {', '.join(ignored)}")
     if not found:
-        log(f"No services with a scheduled task named '{TASK_NAME}' or label '{AUTO_UPDATE_LABEL}'.")
+        log(f"Nothing opted in: no scheduled task named '{TASK_NAME}' or label '{AUTO_UPDATE_LABEL}'.")
         return
-    log(f"Services with '{TASK_NAME}' task or '{AUTO_UPDATE_LABEL}' label:")
+    log(f"Opted in with '{TASK_NAME}' task or '{AUTO_UPDATE_LABEL}' label:")
     width = max(len(v["name"]) for v in found.values())
     for uuid, v in sorted(found.items(), key=lambda kv: kv[1]["name"].lower()):
         state = "enabled " if v["enabled"] else "DISABLED"
-        print(f"    {v['name'].ljust(width)}  {state}  {v['source']:<5}  {v['frequency']:<14}  "
+        kind = "app" if v.get("kind") == "application" else "svc"
+        print(f"    {v['name'].ljust(width)}  {kind}  {state}  {v['source']:<5}  {v['frequency']:<14}  "
               f"{v['timezone']:<18}  {uuid}", flush=True)
 
 
@@ -627,7 +649,8 @@ def main():
 
     apps = discover_unsupported_apps()
     if apps:
-        log(f"WARN '{TASK_NAME}' tasks on applications are not supported (services only): {', '.join(apps)}")
+        log(f"WARN '{TASK_NAME}' tasks are only supported on services and Docker Image applications, "
+            f"ignored: {', '.join(apps)}")
 
     state = {}
     beat()

@@ -41,7 +41,7 @@ assert u.best_version_tag(["v2.1.0", "v2.1"]) == "v2.1.0"
 assert u.best_version_tag(["1.0.0-rc.1", "1.0.0"]) == "1.0.0"
 print("unit ok")
 
-restarts=[]
+restarts=[]; all_restarts=[]
 class H(BaseHTTPRequestHandler):
     def log_message(self,*a): pass
     def send(self, obj, code=200):
@@ -55,20 +55,23 @@ class H(BaseHTTPRequestHandler):
         if p=="/api/v1/services/svc2/scheduled-tasks": return self.send([{"name":"Auto-Update","frequency":"daily","enabled":False}])
         if p in ("/api/v1/services/svc3/scheduled-tasks","/api/v1/services/svc4/scheduled-tasks"): return self.send([])
         if p=="/api/v1/servers": return self.send([{"name":"localhost","settings":{"server_id":0,"server_timezone":"Europe/Copenhagen"}},{"name":"remote","settings":{"server_id":1,"server_timezone":"America/New_York"}}])
-        if p=="/api/v1/applications": return self.send([{"uuid":"app1","name":"myapp"}])
+        if p=="/api/v1/applications": return self.send([{"uuid":"app1","name":"myapp","build_pack":"nixpacks"},{"uuid":"app2","name":"kuma-app","build_pack":"dockerimage"}])
+        if p=="/api/v1/applications/app2/scheduled-tasks": return self.send([{"name":"auto-update","frequency":"30 4 * * *","enabled":True}])
         if p=="/api/v1/applications/app1/scheduled-tasks": return self.send([{"name":"auto-update","frequency":"daily"}])
         if p=="/version": return self.send({"Version":"28"})
         if p=="/containers/json": return self.send([{"Id":"c1","Names":["/uptime-kuma-svc1"],"Labels":{"com.docker.compose.project":"svc1","coolify.auto-update":"false"}},{"Id":"c2","Names":["/other"],"Labels":{}},
             {"Id":"c3","Names":["/vaultwarden-svc3"],"Labels":{"com.docker.compose.project":"svc3","coolify.auto-update":"*/5 * * * *"}},
             {"Id":"c4","Names":["/gotify-svc4"],"Labels":{"com.docker.compose.project":"svc4","coolify.auto-update":"true"}},
-            {"Id":"c5","Names":["/myapp-app1"],"Labels":{"coolify.applicationId":"1","coolify.auto-update":"true"}}])
+            {"Id":"c5","Names":["/myapp-app1"],"Labels":{"coolify.applicationId":"1","coolify.auto-update":"true"}},
+            {"Id":"c6","Names":["/app2-20260928T111330"],"Labels":{"coolify.applicationId":"2","coolify.type":"application"}}])
+        if p=="/containers/c6/json": return self.send({"Config":{"Image":"louislam/uptime-kuma:2"},"Image":"sha256:img1"})
         if p=="/containers/c1/json": return self.send({"Config":{"Image":"louislam/uptime-kuma:2"},"Image":"sha256:img1"})
         if p=="/containers/c3/json": return self.send({"Config":{"Image":"vaultwarden/server:latest"},"Image":"sha256:img3"})
         if p=="/images/sha256:img3/json": return self.send({"RepoDigests":["vaultwarden/server@sha256:cccccccccccccccc"]})
         if p=="/images/sha256:img1/json": return self.send({"RepoDigests":["louislam/uptime-kuma@sha256:aaaaaaaaaaaaaaaa"]})
         self.send({"message":"nf"},404)
     def do_POST(self):
-        restarts.append(self.path); self.send({"message":"queued"})
+        restarts.append(self.path); all_restarts.append(self.path); self.send({"message":"queued"})
 for port in (18080,12375):
     threading.Thread(target=HTTPServer(("127.0.0.1",port),H).serve_forever,daemon=True).start()
 u.remote_digest = lambda *a: "sha256:bbbbbbbbbbbbbbbbbb"
@@ -76,17 +79,18 @@ u.tag_versions = lambda registry, repo, digests: {"sha256:bbbbbbbbbbbbbbbbbb": "
 st={}
 found, ignored = u.discover()
 assert found["svc1"]["source"]=="task" and found["svc1"]["enabled"]  # task wins over label=false
-assert found["svc3"]=={"name":"vaultwarden","frequency":"*/5 * * * *","enabled":True,"source":"label","timezone":"Europe/Copenhagen"}  # TZ override
+assert found["svc3"]=={"name":"vaultwarden","frequency":"*/5 * * * *","enabled":True,"source":"label","timezone":"Europe/Copenhagen","kind":"service"}  # TZ override
 assert found["svc4"]["frequency"]=="daily" and "svc2" in found
 assert ignored==["myapp-app1"]
 CPH = u.zone("Europe/Copenhagen")
 u.socket.gethostname = lambda: "c1"  # we run in svc1's container, so svc1 restarts last
 u.tick(datetime(2026,9,27,4,30,tzinfo=CPH), st)
-assert restarts==["/api/v1/services/svc3/restart?latest=true","/api/v1/services/svc1/restart?latest=true"], restarts  # svc1 task + svc3 label due; svc4 (daily) not
+# svc1 task, svc3 label and app2 task are due; svc4 (daily) is not; svc1 is our own service, so it goes last
+assert restarts==["/api/v1/deploy?uuid=app2","/api/v1/services/svc3/restart?latest=true","/api/v1/services/svc1/restart?latest=true"], restarts
 print("restarts:", restarts)
-assert sorted(restarts)==["/api/v1/services/svc1/restart?latest=true","/api/v1/services/svc3/restart?latest=true"]
+assert len(restarts)==3
 u.tick(datetime(2026,9,27,4,31,tzinfo=CPH), st)
-assert len(restarts)==2
+assert len(restarts)==3  # nothing new due at 04:31
 assert u.coolify("GET", "/version") == (200, "4.2.1")
 # TZ unset: each service follows its server's timezone from Coolify.
 u.TZ_OVERRIDE = ""
@@ -100,6 +104,13 @@ assert "/api/v1/services/svc1/restart?latest=true" in restarts
 restarts.clear()
 u.tick(datetime(2026,9,27,4,30,tzinfo=UTC), {})  # 06:30 in Copenhagen: svc1 not due
 assert "/api/v1/services/svc1/restart?latest=true" not in restarts
+# Docker Image application: found via its task, matched by `<uuid>-<timestamp>` container name, updated via /deploy
+found, _ = u.discover()
+assert found["app2"]["kind"] == "application" and found["app2"]["source"] == "task", found["app2"]
+assert "app1" not in found  # nixpacks application: not supported
+assert u.owner_uuid({"Names": ["/app2-20260928T111330"]}, {"app2"}) == "app2"
+assert u.discover_unsupported_apps() == ["myapp"]
+assert "/api/v1/deploy?uuid=app2" in all_restarts, all_restarts
 assert u.describe_change("docker.io", "louislam/uptime-kuma", {"sha256:aaaaaaaaaaaaaaaa"}, "sha256:bbbbbbbbbbbbbbbbbb") == "aaaaaaaaaaaa -> 2.1.0"
 # Self-update: we run in svc4 (label "true"). Our own label is ignored; SELF_UPDATE decides.
 u.socket.gethostname = lambda: "c4"

@@ -92,6 +92,8 @@ The check at startup only reports. Updates happen at the scheduled times.
 
 coolify-watchtower only updates services you opt in. There are two ways, and either one opts in the whole service, with all its containers.
 
+This works for services (compose and one-click) and for **Docker Image** applications, i.e. an application deployed straight from an image such as `louislam/uptime-kuma:2`. An application uses the same scheduled task. A label goes in the application's **Container Labels** setting, since it has no compose file.
+
 | | Coolify Scheduled Task | docker-compose label |
 |---|---|---|
 | Set it up in | the service's Scheduled Tasks tab | the service's compose file |
@@ -195,10 +197,10 @@ Both carry the same images: `latest` is always the newest release, and version t
 
 ## Limits
 
-- Only services (compose and one-click) are supported. Applications are listed in the log and otherwise ignored.
+- Services and Docker Image applications are supported. Applications built from Git, a Dockerfile or a compose file are listed in the log and otherwise ignored, because deploying them means a full rebuild.
 - Only public registries, such as Docker Hub and ghcr.io.
 - Images pinned by digest and locally built images are skipped.
-- Coolify restarts a service without a rolling update, so expect a short outage. There is no automatic rollback.
+- Coolify restarts a service without a rolling update, so expect a short outage. Docker Image applications get a rolling update. There is no automatic rollback.
 - Month and day names in cron (`JAN`, `MON`) aren't supported.
 
 ## Troubleshooting
