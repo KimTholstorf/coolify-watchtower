@@ -129,5 +129,33 @@ u.SELF_UPDATE = "0 5 * * *"
 assert u.discover()[0]["svc4"]["frequency"] == "0 5 * * *"
 u.socket.gethostname = lambda: "c1"  # a task on our own service still wins
 assert u.discover()[0]["svc1"]["source"] == "task"
+# Opt-in change announcements
+A = {"name": "kuma", "kind": "service", "enabled": True, "source": "task", "frequency": "daily", "timezone": "Europe/Copenhagen"}
+B = {"name": "gotify", "kind": "application", "enabled": True, "source": "label", "frequency": "30 4 * * *", "timezone": "Europe/Copenhagen"}
+assert u.opt_in_changes({"a": A}, {"a": A, "b": B}) == ["+ gotify (application): 30 4 * * * Europe/Copenhagen, via label"]
+assert u.opt_in_changes({"a": A, "b": B}, {"a": A}) == ["- gotify (application): no longer opted in"]
+assert u.opt_in_changes({"a": A}, {"a": dict(A, frequency="*/5 * * * *", enabled=False)}) == ["~ kuma: schedule daily -> */5 * * * *, paused"]
+assert u.opt_in_changes({"a": A}, {"a": dict(A, source="label")}) == ["~ kuma: opted in via task -> label"]
+assert u.opt_in_changes({"a": A}, {"a": A}) == []
+
+sent = []; orig_notify = u.notify; u.notify = lambda title, body: sent.append(body)
+st2 = {}
+u.DISCOVERY_COMPLETE = True
+u.announce_changes({"a": A}, st2)                # startup: baseline only
+u.announce_changes({"a": A}, st2)
+assert sent == []
+u.announce_changes({"a": A, "b": B}, st2)        # new service seen once: wait
+assert sent == []
+u.announce_changes({"a": A, "b": B}, st2)        # seen twice: announce
+assert sent == ["+ gotify (application): 30 4 * * * Europe/Copenhagen, via label"], sent
+u.announce_changes({"a": A}, st2)                # gone for one minute only (restarting): no announcement
+u.announce_changes({"a": A, "b": B}, st2)
+u.announce_changes({"a": A, "b": B}, st2)
+assert len(sent) == 1, sent
+u.DISCOVERY_COMPLETE = False                     # a failed API call must not look like a removal
+u.announce_changes({}, st2); u.announce_changes({}, st2)
+assert len(sent) == 1, sent
+u.DISCOVERY_COMPLETE = True
+u.notify = orig_notify
 print("apps:", u.discover_unsupported_apps())
 print("harness ok")

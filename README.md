@@ -75,18 +75,19 @@ The frequency uses cron syntax, the same as every scheduled task in Coolify, i.e
 Open coolify-watchtower's Runtime logs and expand Updater. Within a minute you'll see your service in the table, and at the scheduled time the result of each check:
 
 ```text
-coolify-watchtower 1.6.1 | coolify=http://coolify:8080 ... tz=from Coolify servers dry_run=False
+coolify-watchtower 1.7.5 | coolify=http://coolify:8080 ... tz=from Coolify servers dry_run=False
 Coolify API OK (version 4.3.23)
 Docker (socket proxy) OK
-Services with 'auto-update' task or 'coolify.auto-update' label:
-    coolify-watchtower  enabled   self   daily           Europe/Copenhagen   udgv5xuy2niy...
-    uptime-kuma         enabled   task   30 4 * * *      Europe/Copenhagen   c92huq7by0wp...
+Opted in with 'auto-update' task or 'coolify.auto-update' label:
+    NAME                TYPE  STATUS   VIA    SCHEDULE        TIMEZONE            UUID
+    coolify-watchtower  svc   enabled  self   daily           Europe/Copenhagen   udgv5xuy2niy...
+    uptime-kuma         svc   enabled  task   30 4 * * *      Europe/Copenhagen   c92huq7by0wp...
 [uptime-kuma] uptime-kuma: louislam/uptime-kuma:2 UPDATE 2.5.4 -> 2.5.5 (917318f9d7be -> c74379ac4509)
 [uptime-kuma] update available (report only, no restart)
 Startup report done. Waiting for schedules.
 ```
 
-The check at startup only reports. Updates happen at the scheduled times.
+The check at startup only reports. Updates happen at the scheduled times. In the table, TYPE is `svc` for a service or `app` for a Docker Image application, and VIA says how it's opted in: a scheduled `task`, a `label`, or `self` for coolify-watchtower's own updates.
 
 ## Opting services in
 
@@ -163,6 +164,15 @@ Set `NOTIFY_URL` and you get a message when an update is started, when a restart
 ```text
 coolify-watchtower: updating uptime-kuma
 louislam/uptime-kuma:2 2.5.4 -> 2.5.5
+```
+
+You also get a message when the list of opted-in services changes: one is added or removed, its schedule changes, or it's paused or resumed. coolify-watchtower waits until a change has held for a minute, so a service restarting doesn't count as removed and added again.
+
+```text
+coolify-watchtower: opt-ins changed
++ uptime-kuma (service): 30 4 * * * Europe/Copenhagen, via task
+~ rejseliv.app: schedule */5 * * * * -> daily
+- old-app (application): no longer opted in
 ```
 
 - **Discord:** create a webhook in the channel (**Channel settings → Integrations → Webhooks**) and use its URL. Coolify's API can't post to the Discord channel you set up inside Coolify, so coolify-watchtower needs its own webhook.

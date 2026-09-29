@@ -28,7 +28,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.7.1"
+VERSION = "1.7.5"
 
 
 def env_bool(name, default):
@@ -238,12 +238,20 @@ def set_log_tz(tzs):
     LOG_TZ = zone(next(iter(set(tzs.values()))) if len(set(tzs.values())) == 1 else "UTC")
 
 
+# False when the last discover() missed data (a failed API or Docker call), so its result
+# mustn't be compared with earlier ones: a failed call would look like services disappearing.
+DISCOVERY_COMPLETE = True
+
+
 def discover():
     """Return ({service_uuid: {name, frequency, enabled, source, timezone}}, [ignored container names]).
 
     Opt-in is a scheduled task named TASK_NAME or a container carrying AUTO_UPDATE_LABEL.
     The task wins over the label. Labelled containers outside any service are ignored.
     Schedules use TZ if set, else the timezone of the server the service runs on."""
+    global DISCOVERY_COMPLETE
+    DISCOVERY_COMPLETE = False
+    complete = True
     st, services = coolify("GET", "/services")
     if st != 200 or not isinstance(services, list):
         log(f"ERROR listing services: HTTP {st} {services}")
@@ -253,6 +261,8 @@ def discover():
     kind = {uuid: "service" for uuid in names}
     # Docker Image applications: Coolify's /deploy pulls their image (other build packs would rebuild).
     st, apps = coolify("GET", "/applications")
+    if st != 200 or not isinstance(apps, list):
+        complete = False
     for a in apps if st == 200 and isinstance(apps, list) else []:
         if a.get("uuid") and a.get("build_pack") == "dockerimage":
             names[a["uuid"]] = a.get("name") or a["uuid"]
@@ -264,6 +274,7 @@ def discover():
         if tzs is None:
             warn_once("servers", "cannot read server timezones from Coolify (GET /servers) - using UTC")
             tzs = {}
+            complete = False
         set_log_tz(tzs)
 
     single_tz = next(iter(set(tzs.values()))) if len(set(tzs.values())) == 1 else None
@@ -276,6 +287,7 @@ def discover():
     for uuid, name in names.items():
         st, tasks = coolify("GET", f"/{kind[uuid]}s/{uuid}/scheduled-tasks")
         if st != 200 or not isinstance(tasks, list):
+            complete = False
             continue
         for t in tasks:
             if (t.get("name") or "").strip().lower() == TASK_NAME:
@@ -293,6 +305,7 @@ def discover():
     except Exception as e:
         log(f"WARN container discovery: {e}")
         containers = []
+        complete = False
     me = own_service(containers, names)
 
     ignored = []
@@ -317,6 +330,7 @@ def discover():
                      "timezone": tz_for(me), "kind": kind[me]}
     if me in found:
         found[me]["self"] = True
+    DISCOVERY_COMPLETE = complete
     return found, sorted(ignored)
 
 
@@ -581,11 +595,73 @@ def print_table(found, ignored):
         return
     log(f"Opted in with '{TASK_NAME}' task or '{AUTO_UPDATE_LABEL}' label:")
     width = max(len(v["name"]) for v in found.values())
+
+    def row(*cols):
+        name, kind, status, via, schedule, tz, uuid = cols
+        print(f"    {name.ljust(width)}  {kind:<4}  {status:<7}  {via:<5}  {schedule:<14}  {tz:<18}  {uuid}", flush=True)
+
+    # TYPE: svc = service, app = Docker Image application. VIA: task, label, or self (SELF_UPDATE).
+    row("NAME", "TYPE", "STATUS", "VIA", "SCHEDULE", "TIMEZONE", "UUID")
     for uuid, v in sorted(found.items(), key=lambda kv: kv[1]["name"].lower()):
-        state = "enabled " if v["enabled"] else "DISABLED"
-        kind = "app" if v.get("kind") == "application" else "svc"
-        print(f"    {v['name'].ljust(width)}  {kind}  {state}  {v['source']:<5}  {v['frequency']:<14}  "
-              f"{v['timezone']:<18}  {uuid}", flush=True)
+        row(v["name"], "app" if v.get("kind") == "application" else "svc",
+            "enabled" if v["enabled"] else "paused", v["source"], v["frequency"], v["timezone"], uuid)
+
+
+# ---------------------------------------------------------------- opt-in change announcements
+
+WATCHED = ("name", "kind", "enabled", "source", "frequency", "timezone")
+
+
+def snapshot(found):
+    return {uuid: {k: cfg.get(k) for k in WATCHED} for uuid, cfg in found.items()}
+
+
+def opt_in_changes(old, new):
+    """Human-readable lines for what differs between two snapshots."""
+    by_name = lambda snap: (lambda uuid: snap[uuid]["name"].lower())
+    lines = []
+    for uuid in sorted(new.keys() - old.keys(), key=by_name(new)):
+        n = new[uuid]
+        lines.append(f"+ {n['name']} ({n['kind']}): {n['frequency']} {n['timezone']}, via {n['source']}"
+                     + ("" if n["enabled"] else ", paused"))
+    for uuid in sorted(old.keys() - new.keys(), key=by_name(old)):
+        lines.append(f"- {old[uuid]['name']} ({old[uuid]['kind']}): no longer opted in")
+    for uuid in sorted(old.keys() & new.keys(), key=by_name(new)):
+        o, n = old[uuid], new[uuid]
+        diffs = []
+        if o["name"] != n["name"]:
+            diffs.append(f"renamed from {o['name']}")
+        if (o["frequency"], o["timezone"]) != (n["frequency"], n["timezone"]):
+            before = o["frequency"] if o["timezone"] == n["timezone"] else f"{o['frequency']} {o['timezone']}"
+            after = n["frequency"] if o["timezone"] == n["timezone"] else f"{n['frequency']} {n['timezone']}"
+            diffs.append(f"schedule {before} -> {after}")
+        if o["enabled"] != n["enabled"]:
+            diffs.append("resumed" if n["enabled"] else "paused")
+        if o["source"] != n["source"]:
+            diffs.append(f"opted in via {o['source']} -> {n['source']}")
+        if diffs:
+            lines.append(f"~ {n['name']}: " + ", ".join(diffs))
+    return lines
+
+
+def announce_changes(found, state):
+    """Log and notify opt-in changes (added, removed, schedule, paused/resumed).
+
+    The first complete discovery is only the baseline. A change is announced once it has looked
+    the same in two complete discoveries in a row, so a service whose containers are briefly gone
+    during a restart isn't reported as removed and re-added. Incomplete discoveries are skipped."""
+    if not DISCOVERY_COMPLETE:
+        return
+    snap = snapshot(found)
+    if "announced" not in state:
+        state["announced"] = snap
+    elif snap != state["announced"] and snap == state.get("last_snapshot"):
+        lines = opt_in_changes(state["announced"], snap)
+        for line in lines:
+            log(f"Opt-in change: {line}")
+        notify("coolify-watchtower: opt-ins changed", "\n".join(lines))
+        state["announced"] = snap
+    state["last_snapshot"] = snap
 
 
 def tick(now, state):
@@ -598,6 +674,7 @@ def tick(now, state):
     if fingerprint != state.get("fingerprint"):
         state["fingerprint"] = fingerprint
         print_table(found, ignored)
+    announce_changes(found, state)
     due = []
     for uuid, cfg in found.items():
         if not cfg["enabled"]:
@@ -662,6 +739,7 @@ def main():
         found, ignored = discover() or ({}, [])
         state["fingerprint"] = json.dumps([found, ignored], sort_keys=True)
         print_table(found, ignored)
+        announce_changes(found, state)  # sets the baseline, announces nothing
         for uuid, cfg in found.items():
             if cfg["enabled"]:
                 check_service(uuid, cfg, allow_restart=False)
