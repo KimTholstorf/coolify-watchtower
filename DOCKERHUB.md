@@ -1,4 +1,4 @@
-![coolify-watchtower logo](https://raw.githubusercontent.com/KimTholstorf/coolify-watchtower/main/assets/logo-icon.png)
+<img src="https://raw.githubusercontent.com/KimTholstorf/coolify-watchtower/main/assets/logo-scene.png" width="160" alt="coolify-watchtower logo, a pixel-art lighthouse by the sea">
 
 # coolify-watchtower
 

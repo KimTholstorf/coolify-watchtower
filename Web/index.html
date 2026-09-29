@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>coolify-watchtower: auto-updates for Coolify</title>
+<meta name="description" content="Automatic image updates for your Coolify services, carried out by Coolify itself. Read-only Docker access, per-service schedules, Discord and ntfy notifications.">
+<meta property="og:title" content="coolify-watchtower">
+<meta property="og:description" content="Automatic image updates for your Coolify services, carried out by Coolify itself.">
+<meta property="og:image" content="https://raw.githubusercontent.com/KimTholstorf/coolify-watchtower/main/assets/logo-icon.png">
+<link rel="icon" href="logo-scene.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=JetBrains+Mono:wght@500&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #fbf7ee;
+    --ink: #111111;
+    --green: #4ade80;
+    --green-deep: #15803d;
+    --lime: #d9f99d;
+    --yellow: #ffd23f;
+    --purple: #b69cff;
+    --white: #ffffff;
+    --line: 3px solid var(--ink);
+    --shadow: 6px 6px 0 var(--ink);
+    --shadow-sm: 4px 4px 0 var(--ink);
+    --radius: 10px;
+    --head: "Archivo Black", "Arial Black", system-ui, sans-serif;
+    --body: "Space Grotesk", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 400 18px/1.55 var(--body);
+    background-image: radial-gradient(var(--ink) 1px, transparent 1px);
+    background-size: 22px 22px;
+    background-position: -11px -11px;
+    background-color: var(--paper);
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: -1;
+    background: color-mix(in srgb, var(--paper) 88%, transparent);
+  }
+  a { color: inherit; }
+  img.pixel { image-rendering: pixelated; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px; }
+  h1, h2, h3 { font-family: var(--head); font-weight: 400; line-height: 1.05; margin: 0; letter-spacing: -0.01em; }
+  h1 { font-size: clamp(42px, 7vw, 78px); }
+  h2 { font-size: clamp(32px, 4.6vw, 52px); }
+  h3 { font-size: 22px; }
+  p { margin: 0; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 10px;
+    font: 700 17px var(--body); text-decoration: none; cursor: pointer;
+    padding: 13px 22px; border: var(--line); border-radius: var(--radius);
+    background: var(--white); color: var(--ink); box-shadow: var(--shadow-sm);
+    transition: transform .12s ease, box-shadow .12s ease;
+  }
+  .btn:hover { transform: translate(-2px, -2px); box-shadow: 6px 6px 0 var(--ink); }
+  .btn:active { transform: translate(4px, 4px); box-shadow: 0 0 0 var(--ink); }
+  .btn:focus-visible, a:focus-visible { outline: 3px solid var(--purple); outline-offset: 3px; }
+  .btn.primary { background: var(--green); }
+  .btn.dark { background: var(--ink); color: var(--paper); }
+  .btn svg { width: 20px; height: 20px; }
+
+  .card { background: var(--white); border: var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+  .sticker {
+    display: inline-block; font: 700 14px var(--body); text-transform: uppercase; letter-spacing: .06em;
+    padding: 6px 12px; border: var(--line); border-radius: 999px; background: var(--yellow);
+  }
+  code, .mono { font-family: var(--mono); font-size: .9em; }
+
+  /* nav */
+  nav { padding: 20px 0; }
+  nav .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font: 700 20px var(--body); white-space: nowrap; }
+  .brand img { width: 40px; height: 40px; }
+  nav ul { display: flex; gap: 22px; list-style: none; margin: 0; padding: 0; align-items: center; }
+  nav ul a { text-decoration: none; font-weight: 500; }
+  nav ul a:not(.btn):hover { text-decoration: underline; text-decoration-thickness: 3px; text-underline-offset: 5px; }
+  nav .btn { padding: 8px 14px; font-size: 15px; }
+
+  /* hero */
+  .hero { padding: 36px 0 70px; }
+  .hero .wrap { display: grid; grid-template-columns: 1.1fr .9fr; gap: 56px; align-items: center; }
+  .hero h1 mark { background: var(--green); padding: 0 .12em; border: var(--line); border-radius: 8px; box-shadow: var(--shadow-sm); display: inline-block; transform: rotate(-1.5deg); }
+  .hero .lead { font-size: 21px; margin: 26px 0 32px; max-width: 34ch; }
+  .actions { display: flex; flex-wrap: wrap; gap: 16px; }
+  .stage { position: relative; min-height: 520px; }
+  .lighthouse { position: absolute; right: 0; top: 0; width: 340px; height: 340px; transform: rotate(2deg); }
+  .stage .sticker { position: absolute; }
+  .s1 { top: -14px; left: 40px; transform: rotate(-6deg); background: var(--purple); }
+  .s2 { top: 150px; left: 0; transform: rotate(4deg); }
+  .notify { position: absolute; left: 10px; bottom: 0; width: min(380px, 100%); padding: 16px; background: #2b2d31; color: #f2f3f5; transform: rotate(-2deg); }
+  .notify .who { display: flex; align-items: center; gap: 10px; font: 700 15px var(--body); }
+  .notify .who img { width: 34px; height: 34px; }
+  .notify .app { font-size: 11px; background: #5865f2; color: #fff; padding: 1px 5px; border-radius: 4px; }
+  .notify .time { color: #949ba4; font-weight: 400; font-size: 12px; }
+  .notify .title { font-weight: 700; margin: 8px 0 8px 44px; font-size: 15px; }
+  .notify pre { margin: 0 0 0 44px; padding: 8px 10px; background: #1e1f22; border: 1px solid #3f4147; border-radius: 6px; font: 500 13px var(--mono); white-space: pre-wrap; }
+
+  /* marquee */
+  .band { background: var(--ink); color: var(--paper); border-block: var(--line); overflow: hidden; transform: rotate(-1deg); margin: 10px -10px; }
+  .band .track { display: flex; width: max-content; animation: slide 32s linear infinite; }
+  .band span { font: 400 22px var(--head); padding: 14px 0; white-space: nowrap; }
+  .band span::after { content: "✦"; color: var(--green); margin: 0 26px; }
+  @keyframes slide { to { transform: translateX(-50%); } }
+
+  section { padding: 90px 0; }
+  .kicker { font: 700 15px var(--body); text-transform: uppercase; letter-spacing: .1em; color: var(--green-deep); margin-bottom: 12px; }
+  .intro { max-width: 60ch; margin: 18px 0 44px; font-size: 20px; }
+
+  /* steps */
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; counter-reset: step; }
+  .step { padding: 28px 26px 30px; position: relative; }
+  .step:nth-child(1) { background: var(--lime); }
+  .step:nth-child(2) { background: var(--yellow); }
+  .step:nth-child(3) { background: var(--green); }
+  .step .num { font: 400 58px/1 var(--head); display: block; margin-bottom: 14px; }
+  .step h3 { margin-bottom: 10px; }
+
+  /* compare */
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  .versus { padding: 30px; }
+  .versus h3 { margin-bottom: 16px; }
+  .versus ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+  .versus li { padding-left: 34px; position: relative; }
+  .versus li::before { position: absolute; left: 0; top: -1px; font: 700 20px var(--body); }
+  .versus.them { background: #eeeae0; }
+  .versus.them li::before { content: "✗"; }
+  .versus.us { background: var(--green); transform: rotate(-1deg); }
+  .versus.us li::before { content: "✓"; }
+  .credit { margin-top: 22px; font-size: 16px; }
+
+  /* features */
+  .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  .feature { padding: 24px; }
+  .feature .tag { display: inline-block; font: 700 13px var(--body); text-transform: uppercase; letter-spacing: .08em; padding: 4px 10px; border: var(--line); border-radius: 6px; margin-bottom: 14px; }
+  .feature:nth-child(3n+1) .tag { background: var(--green); }
+  .feature:nth-child(3n+2) .tag { background: var(--yellow); }
+  .feature:nth-child(3n) .tag { background: var(--purple); }
+  .feature p { font-size: 17px; }
+
+  /* install */
+  .install { background: var(--yellow); padding: 44px; display: grid; grid-template-columns: 1fr auto; gap: 30px 40px; align-items: center; }
+  .install h2 { grid-column: 1 / -1; }
+  .oneliner { background: var(--ink); color: var(--paper); border: var(--line); border-radius: var(--radius); padding: 18px 20px; font: 500 16px/1.6 var(--mono); overflow-x: auto; }
+  .oneliner b { color: var(--green); font-weight: 500; white-space: nowrap; }
+  .install .side { display: grid; gap: 14px; justify-items: start; }
+  .install .note { font-size: 16px; grid-column: 1 / -1; }
+  #copy-status { font-size: 15px; font-weight: 500; min-height: 1.4em; }
+
+  /* footer */
+  .final { text-align: center; }
+  .final .card { background: var(--green); padding: 60px 30px; }
+  .final p { font-size: 20px; margin: 18px auto 30px; max-width: 40ch; }
+  .final .actions { justify-content: center; }
+  footer { padding: 30px 0 50px; font-size: 15px; }
+  footer .wrap { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+
+  @media (max-width: 860px) {
+    .hero .wrap, .compare, .install { grid-template-columns: 1fr; }
+    .steps, .features { grid-template-columns: 1fr; }
+    .stage { min-height: 540px; max-width: 420px; }
+    nav ul li:not(:last-child) { display: none; }
+    .brand { font-size: 17px; }
+    .brand img { width: 34px; height: 34px; }
+    .versus.us { transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .band .track { animation: none; }
+    .btn { transition: none; }
+    html { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#top"><img class="pixel" src="logo-scene.svg" alt=""> coolify-watchtower</a>
+    <ul>
+      <li><a href="#how">How it works</a></li>
+      <li><a href="#why">Why</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a class="btn dark" href="https://github.com/KimTholstorf/coolify-watchtower">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap">
+    <div>
+      <span class="sticker">For Coolify v4</span>
+      <h1 style="margin-top: 22px;">Fresh images. <mark>Zero</mark> babysitting.</h1>
+      <p class="lead">coolify-watchtower keeps your Coolify services up to date. When a new image lands, Coolify updates the service and you get a ping.</p>
+      <div class="actions">
+        <a class="btn primary" href="https://github.com/KimTholstorf/coolify-watchtower">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.2.5-2.3 1.2-3.1-.1-.4-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.7 18.3 5 18.3 5c.7 1.7.2 2.8.1 3.2.8.8 1.2 1.9 1.2 3.1 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .5z"/></svg>
+          View on GitHub
+        </a>
+        <a class="btn" href="#install">Install in a minute →</a>
+      </div>
+    </div>
+
+    <div class="stage" aria-hidden="true">
+      <img class="lighthouse pixel" src="logo-scene.png" alt="">
+      <span class="sticker s1">Coolify-native</span>
+      <span class="sticker s2">Read-only Docker</span>
+      <div class="notify card">
+        <div class="who"><img class="pixel" src="logo-scene.svg" alt=""> coolify-watchtower <span class="app">APP</span> <span class="time">04.30</span></div>
+        <div class="title">coolify-watchtower: updating uptime&#8209;kuma</div>
+        <pre>louislam/uptime-kuma:2 2.5.4 -> 2.5.5</pre>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="band" aria-hidden="true">
+  <div class="track">
+    <span>Read-only Docker</span><span>Schedules per service</span><span>Discord and ntfy</span><span>Updates itself</span><span>Shows in your deploy history</span><span>MIT licensed</span>
+    <span>Read-only Docker</span><span>Schedules per service</span><span>Discord and ntfy</span><span>Updates itself</span><span>Shows in your deploy history</span><span>MIT licensed</span>
+  </div>
+</div>
+
+<main>
+  <section id="how">
+    <div class="wrap">
+      <p class="kicker">How it works</p>
+      <h2>You add one task. It does the rest.</h2>
+      <p class="intro">No new dashboard to learn. The settings live where you already work: in Coolify.</p>
+      <div class="steps">
+        <div class="step card">
+          <span class="num">01</span>
+          <h3>Opt in</h3>
+          <p>Add a scheduled task called <code>auto-update</code> to a service. Its schedule is the update schedule.</p>
+        </div>
+        <div class="step card">
+          <span class="num">02</span>
+          <h3>It checks</h3>
+          <p>On schedule, it compares your running images with the registry. If nothing's new, nothing happens.</p>
+        </div>
+        <div class="step card">
+          <span class="num">03</span>
+          <h3>Coolify updates</h3>
+          <p>If there's a newer image, Coolify pulls it and restarts the service. It shows up in your deployment history.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="why">
+    <div class="wrap">
+      <p class="kicker">Why not Watchtower?</p>
+      <h2>Coolify stays in charge.</h2>
+      <p class="intro">Watchtower is great on plain Docker. On a Coolify server it gets in the way.</p>
+      <div class="compare">
+        <div class="versus them card">
+          <h3>Watchtower</h3>
+          <ul>
+            <li>Swaps containers behind Coolify's back</li>
+            <li>Coolify never hears about it</li>
+            <li>Needs write access to Docker</li>
+          </ul>
+        </div>
+        <div class="versus us card">
+          <h3>coolify-watchtower</h3>
+          <ul>
+            <li>Asks Coolify to do the update</li>
+            <li>Every update is in your deploy history</li>
+            <li>Only reads from Docker</li>
+          </ul>
+        </div>
+      </div>
+      <p class="credit">Plain Docker host? Use <a href="https://github.com/nicholas-fedor/watchtower">Watchtower</a>, maintained by Nick Fedor.</p>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <p class="kicker">The details</p>
+      <h2>The fiddly bits, handled.</h2>
+      <p class="intro">It's one small container. Here's what it takes care of.</p>
+      <div class="features">
+        <div class="feature card"><span class="tag">Read-only</span><p>Docker access goes through a read-only proxy. All changes go through Coolify.</p></div>
+        <div class="feature card"><span class="tag">Real versions</span><p>Messages say <code>2.5.4 → 2.5.5</code> instead of a wall of digests.</p></div>
+        <div class="feature card"><span class="tag">Your timezone</span><p>Schedules follow your server's timezone in Coolify. 04:30 means 04:30.</p></div>
+        <div class="feature card"><span class="tag">Self-updating</span><p>It keeps itself current too. Daily, unless you say otherwise.</p></div>
+        <div class="feature card"><span class="tag">Apps too</span><p>Works for services and Docker Image applications.</p></div>
+        <div class="feature card"><span class="tag">Heads-up</span><p>Add a service, remove one or change a schedule, and it tells you.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="wrap">
+      <div class="install card">
+        <h2>Install in a minute.</h2>
+        <div class="oneliner">+ New Resource → Docker Compose (empty) → paste <b>docker-compose.yml</b> → set <b>COOLIFY_TOKEN</b></div>
+        <div class="side">
+          <button class="btn dark" id="copy" type="button">Copy docker-compose.yml</button>
+          <span id="copy-status" role="status"></span>
+        </div>
+        <p class="note">You need a Coolify API token with <code>read</code> and <code>deploy</code>. Everything else has a default. <a href="https://github.com/KimTholstorf/coolify-watchtower#quick-start">Full guide on GitHub →</a></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="final">
+    <div class="wrap">
+      <div class="card">
+        <h2>Ready when you are.</h2>
+        <p>Try it on your server, or star it for later.</p>
+        <div class="actions">
+          <a class="btn dark" href="https://github.com/KimTholstorf/coolify-watchtower">Star it on GitHub</a>
+          <a class="btn" href="https://hub.docker.com/r/kimtholstorf/coolify-watchtower">Docker Hub</a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>MIT licensed. Not affiliated with Coolify or Watchtower.</span>
+    <span>Made by <a href="https://github.com/KimTholstorf">Kim Tholstorf</a></span>
+  </div>
+</footer>
+
+<script>
+  const RAW = "https://raw.githubusercontent.com/KimTholstorf/coolify-watchtower/main/docker-compose.yml";
+  const copyBtn = document.getElementById("copy");
+  const status = document.getElementById("copy-status");
+  copyBtn.addEventListener("click", async () => {
+    status.textContent = "Fetching…";
+    try {
+      const res = await fetch(RAW);
+      if (!res.ok) throw new Error(res.status);
+      await navigator.clipboard.writeText(await res.text());
+      status.textContent = "Copied. Paste it into Coolify.";
+    } catch (e) {
+      status.innerHTML = 'Couldn\'t copy. <a href="' + RAW + '">Open the file</a> instead.';
+    }
+  });
+</script>
+</body>
+</html>

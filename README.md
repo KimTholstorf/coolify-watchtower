@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo-icon.svg" width="128" alt="coolify-watchtower logo, a pixel-art lighthouse">
+  <img src="assets/logo-scene.png" width="160" alt="coolify-watchtower logo, a pixel-art lighthouse by the sea">
 </p>
 
 <h1 align="center">coolify-watchtower</h1>
