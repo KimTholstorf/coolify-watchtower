@@ -6,7 +6,9 @@ ENV TESTBED_VERSION=${TESTBED_VERSION} TESTBED_BROKEN=${TESTBED_BROKEN} PYTHONUN
 
 WORKDIR /app
 COPY app.py .
-RUN mkdir /data && chown nobody /data
+# The `testbed` command, for Coolify's terminal when the web page isn't reachable.
+COPY cli.py /usr/local/bin/testbed
+RUN chmod 755 /usr/local/bin/testbed && mkdir /data && chown nobody /data
 USER nobody
 EXPOSE 8080
 

@@ -13,6 +13,20 @@ It has two containers, `web` and `worker`. `web` serves a control page with butt
 
 To test faster, add `HEAL_AFTER=1` and `HEAL_RETRY_AFTER=2` to coolify-watchtower's environment while testing. Remove them afterwards.
 
+## From a terminal
+
+When the page isn't reachable, open the container's terminal in Coolify and use the `testbed` command. It does the same as the buttons.
+
+```text
+testbed                        menu: pick an action by number, w switches to the worker, q quits
+testbed status                 health of web and worker
+testbed unhealthy              run an action directly (testbed --unhealthy works too)
+testbed unhealthy --worker     the same, on the worker
+testbed help                   all actions
+```
+
+The actions are `unhealthy`, `unhealthy-persistent`, `hang`, `crash`, `crash-loop`, `slow-start` and `recover`.
+
 ## Publish a new version
 
 Go to **Actions → testbed → Run workflow**. Each run publishes a new `latest`, versioned `1.0.<run number>`. Tick **broken** to publish a release whose health check always fails. The next normal run fixes it.
