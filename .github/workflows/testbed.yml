@@ -1,0 +1,45 @@
+name: testbed
+
+# Publishes a new version of the testbed image, on demand (Actions -> testbed -> Run workflow),
+# so coolify-watchtower has a real update to find. Tick "broken" to publish a release whose health
+# check fails from the start; the next normal run fixes it again.
+on:
+  workflow_dispatch:
+    inputs:
+      broken:
+        description: "Publish a broken release (health check fails)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Version
+        id: v
+        run: echo "version=1.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v7
+        with:
+          context: testbed
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            TESTBED_VERSION=${{ steps.v.outputs.version }}
+            TESTBED_BROKEN=${{ inputs.broken }}
+          tags: |
+            ghcr.io/kimtholstorf/coolify-watchtower-testbed:latest
+            ghcr.io/kimtholstorf/coolify-watchtower-testbed:${{ steps.v.outputs.version }}
+      - name: Summary
+        run: echo "Published testbed ${{ steps.v.outputs.version }} (broken=${{ inputs.broken }})" >> "$GITHUB_STEP_SUMMARY"
