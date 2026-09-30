@@ -1,11 +1,14 @@
 # coolify-watchtower testbed: a two-container service to break on purpose.
-# Coolify: + New Resource -> Docker Compose (empty) -> paste this file, then give "web" a domain.
+# Coolify: + New Resource -> Docker Compose (empty) -> paste this file.
+# Control it with the `testbed` command in the container's terminal, or give "web" a domain
+# (e.g. https://testbed.example.com:8080) to use the web page.
 # Opt it in with a scheduled task named "watchtower" (command: true, container: web).
 services:
   web:
     image: ghcr.io/kimtholstorf/coolify-watchtower-testbed:latest
     environment:
-      - SERVICE_FQDN_WEB_8080
+      # Uncomment to have Coolify create a domain for the web page automatically:
+      # - SERVICE_FQDN_WEB_8080
       - ROLE=web
       - WORKER_URL=http://worker:8080
     volumes:

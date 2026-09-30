@@ -7,15 +7,15 @@ It has two containers, `web` and `worker`. `web` serves a control page with butt
 ## Set it up
 
 1. In Coolify, go to **+ New Resource → Docker Compose (empty)** and paste [`docker-compose.yml`](docker-compose.yml).
-2. Give `web` a domain and deploy.
+2. Deploy. A domain is optional: to use the web page, give `web` one with the port, e.g. `https://testbed.example.com:8080`. Without one, use the [`testbed` command](#from-a-terminal).
 3. On the service, add a scheduled task named `watchtower` with the command `true`, frequency `*/5 * * * *` and container `web`.
-4. Open the domain. The page shows both containers' health, the version and how often each has started.
+4. Run `testbed status` in `web`'s terminal, or open the page. Both show the health of each container, the version and how often each has started.
 
 To test faster, add `HEAL_AFTER=1` and `HEAL_RETRY_AFTER=2` to coolify-watchtower's environment while testing. Remove them afterwards.
 
 ## From a terminal
 
-When the page isn't reachable, open the container's terminal in Coolify and use the `testbed` command. It does the same as the buttons.
+Open the container's terminal in Coolify and use the `testbed` command. It does the same as the buttons on the page.
 
 ```text
 testbed                        menu: pick an action by number, w switches to the worker, q quits
