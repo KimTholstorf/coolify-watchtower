@@ -28,7 +28,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.8.5"
+VERSION = "1.8.6"
 
 
 def env_bool(name, default):
@@ -953,14 +953,65 @@ def tick(now, state):
     heal(found, now, state)
 
 
+def settings_report():
+    """Startup lines: every setting with its effective value and where it comes from.
+    'env' = set in the environment (compose file or Coolify), 'default' = built into the image.
+    Secrets only show whether they're set."""
+    def source(name):
+        return "env" if os.environ.get(name, "").strip() else "default"
+
+    rows = [
+        ("COOLIFY_URL", COOLIFY_URL),
+        ("COOLIFY_TOKEN", "set" if COOLIFY_TOKEN else "missing"),
+        ("NOTIFY_URL", "set" if NOTIFY_URL else "off"),
+        ("DRY_RUN", str(DRY_RUN).lower()),
+        ("SELF_UPDATE", SELF_UPDATE),
+        ("TZ", TZ_OVERRIDE or "from Coolify servers"),
+        ("DEFAULT_SCHEDULE", DEFAULT_SCHEDULE),
+        ("REPORT_ON_START", str(REPORT_ON_START).lower()),
+        ("TASK_NAME", TASK_NAME),
+        ("AUTO_UPDATE_LABEL", AUTO_UPDATE_LABEL),
+        ("AUTO_HEAL", str(AUTO_HEAL).lower()),
+        ("HEAL_AFTER", f"{HEAL_AFTER} min"),
+        ("HEAL_RETRY_AFTER", f"{HEAL_RETRY_AFTER} min"),
+        ("HEAL_MAX_RESTARTS", str(HEAL_MAX_RESTARTS)),
+        ("HEAL_OUTAGE_THRESHOLD", str(HEAL_OUTAGE_THRESHOLD)),
+        ("DOCKER_HOST", DOCKER_URL),
+    ]
+    lines = ["Settings (env = from the environment, default = built into the image):"]
+    lines += [f"    {name:<22} {value:<32} {'-' if name == 'COOLIFY_TOKEN' and not COOLIFY_TOKEN else source(name)}"
+              for name, value in rows]
+    extras = []
+    if TASK_NAME not in ("watchtower", LEGACY_TASK):
+        extras.append(f"task '{TASK_NAME}'")
+    if AUTO_UPDATE_LABEL not in ("coolify.watchtower", LEGACY_LABEL):
+        extras.append(f"label '{AUTO_UPDATE_LABEL}'")
+    lines.append("Opt-in: a scheduled task 'watchtower' or the label 'coolify.watchtower' (the old 'auto-update' and "
+                 "'coolify.auto-update' still work)" + (f", plus {' and '.join(extras)}" if extras else ""))
+    return lines
+
+
+def leftover_warnings():
+    """Old names set explicitly: almost always variables left over in Coolify from an older compose file."""
+    warnings = []
+    for name, legacy in (("TASK_NAME", LEGACY_TASK), ("AUTO_UPDATE_LABEL", LEGACY_LABEL)):
+        if os.environ.get(name, "").strip() == legacy:
+            warnings.append(f"WARN {name}={legacy} looks like a leftover from an older compose file. Delete it in "
+                            f"Coolify's Environment Variables tab and restart. Everything works meanwhile.")
+    return warnings
+
+
 def main():
     if COOLIFY_TOKEN and not TZ_OVERRIDE:
         try:  # so even the first log lines use the server's timezone
             set_log_tz(server_timezones() or {})
         except Exception:
             pass
-    log(f"coolify-watchtower {VERSION} | coolify={COOLIFY_URL} docker={DOCKER_URL} "
-        f"task='{TASK_NAME}' label='{AUTO_UPDATE_LABEL}' tz={TZ_OVERRIDE or 'from Coolify servers'} dry_run={DRY_RUN}")
+    log(f"coolify-watchtower {VERSION}")
+    for line in settings_report():
+        log(line)
+    for line in leftover_warnings():
+        log(line)
     if not COOLIFY_TOKEN:
         log("ERROR COOLIFY_TOKEN is not set")
         raise SystemExit(1)

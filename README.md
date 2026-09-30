@@ -75,7 +75,12 @@ The frequency uses cron syntax, the same as every scheduled task in Coolify, i.e
 Open coolify-watchtower's Runtime logs and expand Updater. Within a minute you'll see your service in the table, and at the scheduled time the result of each check:
 
 ```text
-coolify-watchtower 1.8.0 | coolify=http://coolify:8080 ... tz=from Coolify servers dry_run=False
+coolify-watchtower 1.8.6
+Settings (env = from the environment, default = built into the image):
+    COOLIFY_URL            http://coolify:8080              env
+    COOLIFY_TOKEN          set                              env
+    DRY_RUN                false                            env
+    ...
 Coolify API OK (version 4.3.23)
 Docker (socket proxy) OK
 Opted in with a 'watchtower' task or 'coolify.watchtower' label:
@@ -87,7 +92,7 @@ Opted in with a 'watchtower' task or 'coolify.watchtower' label:
 Startup report done. Waiting for schedules.
 ```
 
-The check at startup only reports. Updates happen at the scheduled times. In the table, TYPE is `svc` for a service or `app` for a Docker Image application, and VIA says how it's opted in: a scheduled `task`, a `label`, or `self` for coolify-watchtower's own updates. HEALTH says whether the service's status is checked after an update.
+The settings list shows each value in effect and whether it comes from the environment (`env`) or is built into the image (`default`). The token and notification URL only show whether they're set. The check at startup only reports. Updates happen at the scheduled times. In the table, TYPE is `svc` for a service or `app` for a Docker Image application, and VIA says how it's opted in: a scheduled `task`, a `label`, or `self` for coolify-watchtower's own updates. HEALTH says whether the service's status is checked after an update.
 
 ## Opting services in
 
@@ -247,6 +252,8 @@ Versions such as `2.5.4 -> 2.5.5` come from the registry's tags. When no version
 coolify-watchtower updates itself on the `SELF_UPDATE` schedule, daily by default. When other services are due at the same time, it restarts itself last. You can also update it any time with **Pull Latest Images & Restart**.
 
 Both update only the image. Coolify keeps the compose file you pasted and never replaces it, so this project keeps its compose file stable and puts changes in the image. If a release ever needs a new compose file, its release notes say so, and you paste the new one under **Edit Compose File**.
+
+After pasting a new compose file, check the resource's **Environment Variables** tab. Coolify keeps variables the old file created, even when the new one no longer uses them, and still passes them to the container. Delete any that aren't in the new file, then restart. The startup log warns you about known leftovers.
 
 The image is published in two places:
 

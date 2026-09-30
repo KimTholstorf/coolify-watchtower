@@ -279,5 +279,15 @@ assert u.heal_restart("svc4", svc("gotify"))[0] == "the whole service" and all_r
 # a Docker Image application: its own restart endpoint (no pull)
 assert u.heal_restart("app2", dict(svc("kuma-app"), kind="application"))[0] == "the application" and all_restarts[-1] == "/api/v1/applications/app2/restart"
 u.notify = orig_notify
+# Startup settings overview and leftover warnings
+lines = u.settings_report()
+row = lambda name: next(l for l in lines if l.split()[:1] == [name])
+assert row("COOLIFY_URL").endswith("env") and row("HEAL_AFTER").endswith("default")   # env set by this test / image default
+assert "set" in row("COOLIFY_TOKEN") and "t" not in row("COOLIFY_TOKEN").split()[1:2]  # the token itself is never shown
+assert row("TZ").split()[-1] == "env"
+os.environ["TASK_NAME"] = "auto-update"
+assert any("TASK_NAME=auto-update looks like a leftover" in w for w in u.leftover_warnings())
+del os.environ["TASK_NAME"]
+assert u.leftover_warnings() == []
 print("apps:", u.discover_unsupported_apps())
 print("harness ok")
