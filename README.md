@@ -140,11 +140,25 @@ Schedules use cron syntax, like all scheduled tasks in Coolify: five fields for 
 
 Schedules run in the timezone set for the server in Coolify (**Servers → General → Server Timezone**), the same as Coolify's own scheduled tasks.
 
-### Health check after updates
+### Health checks and self-healing
 
-After each update, coolify-watchtower checks the service's status in Coolify (see [Notifications](#notifications)). It's on by default. To turn it off for one service, for example one whose status in Coolify is never green:
+coolify-watchtower watches the status Coolify shows for each opted-in service. After an update, it tells you whether the service came back healthy (see [Notifications](#notifications)). It also restarts a service that stays unhealthy or degraded. Docker restarts a container that exits, but never one that's only unhealthy, so this fills the gap.
 
-| Opted in with | Turn the health check off |
+Self-healing follows these rules:
+
+| Rule | Why |
+|---|---|
+| Only `running:unhealthy` and `degraded:unhealthy` count | a stopped, paused or starting service may be that way on purpose |
+| The status must stay bad for 5 minutes | one bad reading isn't enough |
+| Only the failing container of a service is restarted, when Coolify can tell which | less disruption |
+| It restarts without pulling new images | healing never turns into an unplanned update |
+| At most 2 restarts per incident, 15 minutes apart | a crash loop gets reported to you instead |
+| 3 or more services unhealthy at once: no restarts, just a warning | that usually means the server itself has a problem |
+| Never while an update is being checked, a deployment is running, or Coolify can't reach the server | the status can't be trusted then |
+
+Both are on by default. To turn them off for one service, for example one whose status in Coolify is never green:
+
+| Opted in with | Turn health checks off |
 |---|---|
 | Scheduled task | set the command to `true healthcheck=false` |
 | Label | add the label `coolify.watchtower.healthcheck=false` |
@@ -178,6 +192,11 @@ These aren't in the compose file. To use one, add it to the updater's `environme
 |---|---|---|
 | `TASK_NAME` | `watchtower` | an extra scheduled task name that opts a service in |
 | `AUTO_UPDATE_LABEL` | `coolify.watchtower` | an extra label name that opts a service in |
+| `AUTO_HEAL` | `true` | `false` turns self-healing off for everything |
+| `HEAL_AFTER` | `5` | minutes a service must stay unhealthy before the first restart |
+| `HEAL_RETRY_AFTER` | `15` | minutes to wait after a restart before trying again |
+| `HEAL_MAX_RESTARTS` | `2` | restarts per incident before giving up until the service is healthy again |
+| `HEAL_OUTAGE_THRESHOLD` | `3` | services unhealthy at the same time that count as a server problem (no restarts) |
 
 The standard names `watchtower` and `coolify.watchtower`, and the old ones, keep working either way.
 
@@ -200,6 +219,14 @@ coolify-watchtower: opt-ins changed
 ```
 
 After each update, coolify-watchtower keeps an eye on the service's status in Coolify. You get one more message: healthy once it has been running without a failing health check for two checks in a row, or unhealthy if that hasn't happened within 10 minutes. There's no automatic rollback, so the warning tells you when to step in. Services without a health check of their own can only be reported as running.
+
+Self-healing sends a message when it restarts something, when a service recovers, and when it gives up:
+
+```text
+coolify-watchtower: ⚠ immich unhealthy, restarting
+Coolify status: running:unhealthy for 5 min
+Restarting immich-server (attempt 1 of 2).
+```
 
 ```text
 coolify-watchtower: ⚠ uptime-kuma looks unhealthy after the update

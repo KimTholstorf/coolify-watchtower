@@ -54,6 +54,9 @@ class H(BaseHTTPRequestHandler):
         if p=="/api/v1/services/svc1/scheduled-tasks": return self.send([{"name":"auto-update","frequency":"30 4 * * *","enabled":True}])
         if p=="/api/v1/services/svc2/scheduled-tasks": return self.send([{"name":"Auto-Update","frequency":"hourly","enabled":True,"command":"true"},{"name":"Watchtower","frequency":"daily","enabled":False,"command":"true healthcheck=false"}])
         if p in ("/api/v1/services/svc3/scheduled-tasks","/api/v1/services/svc4/scheduled-tasks"): return self.send([])
+        if p=="/api/v1/services/svc1": return self.send({"uuid":"svc1","applications":[{"uuid":"a1","name":"web","status":"running:unhealthy"},{"uuid":"a2","name":"worker","status":"running:healthy"}],"databases":[{"uuid":"d1","name":"db","status":"running:healthy"}]})
+        if p=="/api/v1/services/svc4": return self.send({"uuid":"svc4","applications":[{"uuid":"g1","name":"gotify","status":"running:unhealthy"}],"databases":[]})
+        if p=="/api/v1/deployments": return self.send([{"application_name":"busy-app","status":"in_progress"}])
         if p=="/api/v1/servers": return self.send([{"name":"localhost","settings":{"server_id":0,"server_timezone":"Europe/Copenhagen"}},{"name":"remote","settings":{"server_id":1,"server_timezone":"America/New_York"}}])
         if p=="/api/v1/applications": return self.send([{"uuid":"app1","name":"myapp","build_pack":"nixpacks"},{"uuid":"app2","name":"kuma-app","build_pack":"dockerimage"}])
         if p=="/api/v1/applications/app2/scheduled-tasks": return self.send([{"name":"auto-update","frequency":"30 4 * * *","enabled":True}])
@@ -211,5 +214,70 @@ assert "rename the label 'coolify.auto-update' to 'coolify.watchtower'" in u.leg
 assert u.legacy_note({}) == ""
 assert {"watchtower", "auto-update"} <= u.TASK_NAMES and u.OPT_IN_LABELS[0] == "coolify.watchtower"
 assert u.opt_in_changes({"a": A}, {"a": dict(A, healthcheck=False)}) == ["~ kuma: health check off"]
+# Self-healing
+assert u.status_broken("running:unhealthy") and u.status_broken("degraded:unhealthy")
+for ok in ("running:healthy", "running:unknown", "exited", "paused:unknown", "starting:unknown", "starting:unhealthy", "running:unhealthy:excluded", ""):
+    assert not u.status_broken(ok), ok
+assert u.part_broken("running:unhealthy") and u.part_broken("restarting:unknown") and u.part_broken("exited") and not u.part_broken("running:healthy")
+
+sent = []; orig_notify = u.notify; u.notify = lambda title, body: sent.append(title)
+svc = lambda name, **kw: dict({"name": name, "kind": "service", "enabled": True, "source": "task", "frequency": "daily", "timezone": "UTC", "healthcheck": True}, **kw)
+hfound = {"svc1": svc("immich"), "svc4": svc("gotify"), "svc2": svc("off", healthcheck=False), "me": svc("cw", self=True)}
+T0 = datetime(2026, 9, 30, 12, 0, tzinfo=u.zone("UTC"))
+def minute(m, statuses, st):
+    u.STATUSES.clear(); u.STATUSES.update(statuses); u.DISCOVERY_COMPLETE = True
+    all_restarts.clear(); u.heal(hfound, T0 + timedelta(minutes=m), st)
+    return list(all_restarts)
+
+hs = {}
+bad = {"svc1": "running:unhealthy", "svc4": "running:healthy", "svc2": "degraded:unhealthy", "me": "degraded:unhealthy"}
+for m in range(4):
+    assert minute(m, bad, hs) == []                                  # not yet HEAL_AFTER (5) minutes
+assert minute(4, bad, hs) == ["/api/v1/services/svc1/applications/a1/restart"], all_restarts  # only the failing part
+assert "unhealthy, restarting" in sent[-1]
+for m in range(5, 19):
+    assert minute(m, bad, hs) == []                                  # waiting HEAL_RETRY_AFTER (15) minutes
+assert minute(19, bad, hs) == ["/api/v1/services/svc1/applications/a1/restart"]   # attempt 2 of 2
+for m in range(20, 34):
+    minute(m, bad, hs)
+minute(34, bad, hs)
+assert "still unhealthy after 2 restarts" in sent[-1], sent
+assert minute(60, bad, hs) == []                                     # given up: no more restarts
+ok = dict(bad, svc1="running:healthy")
+minute(61, ok, hs); minute(62, ok, hs)
+assert "recovered" in sent[-1] and hs["heal"]["svc1"]["restarts"] == 0, sent
+
+sent.clear(); hs = {}                                                # starting/exited are never restarted
+for m in range(10):
+    assert minute(m, dict(bad, svc1="starting:unknown"), hs) == [] and minute(m, dict(bad, svc1="exited"), hs) == []
+assert sent == []
+
+hs = {"pending": {"svc1": {}}}                                       # a post-update check is running: wait for it
+for m in range(10):
+    assert minute(m, bad, hs) == []
+
+sent.clear(); hs = {}                                                # three at once: server problem, no restarts
+hfound["svc5"] = svc("vault")
+outage = dict(bad, svc4="running:unhealthy", svc5="degraded:unhealthy")
+for m in range(10):
+    assert minute(m, outage, hs) == []
+assert len(sent) == 1 and "3 services unhealthy at once" in sent[0], sent
+del hfound["svc5"]
+
+hs = {}; u.SERVER_DOWN.add("svc1")                                   # unreachable server: stale status, hands off
+for m in range(10):
+    assert minute(m, bad, hs) == []
+u.SERVER_DOWN.clear()
+
+hs = {}; hfound["app9"] = dict(svc("busy-app"), kind="application")  # an application being deployed: wait
+for m in range(10):
+    r = minute(m, {"app9": "running:unhealthy"}, hs)
+    assert "/api/v1/applications/app9/restart" not in r
+del hfound["app9"]
+# every part of the service is broken: restart the whole service (without pulling)
+assert u.heal_restart("svc4", svc("gotify"))[0] == "the whole service" and all_restarts[-1] == "/api/v1/services/svc4/restart"
+# a Docker Image application: its own restart endpoint (no pull)
+assert u.heal_restart("app2", dict(svc("kuma-app"), kind="application"))[0] == "the application" and all_restarts[-1] == "/api/v1/applications/app2/restart"
+u.notify = orig_notify
 print("apps:", u.discover_unsupported_apps())
 print("harness ok")

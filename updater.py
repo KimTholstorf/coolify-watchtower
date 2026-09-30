@@ -28,7 +28,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.8.0"
+VERSION = "1.8.5"
 
 
 def env_bool(name, default):
@@ -51,6 +51,22 @@ HEALTH_LABEL = "coolify.watchtower.healthcheck"
 # After an update: wait this long before trusting Coolify's status, and give up on "healthy" after this long.
 HEALTH_GRACE = 120
 HEALTH_TIMEOUT = 600
+
+
+def env_int(name, default):
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except ValueError:
+        return int(default)
+
+
+# Self-healing: restart opted-in resources that stay unhealthy or degraded (defaults shipped in the image;
+# override in the compose file's environment). HEAL_AFTER and HEAL_RETRY_AFTER are minutes.
+AUTO_HEAL = env_bool("AUTO_HEAL", "true")
+HEAL_AFTER = env_int("HEAL_AFTER", "5")
+HEAL_RETRY_AFTER = env_int("HEAL_RETRY_AFTER", "15")
+HEAL_MAX_RESTARTS = env_int("HEAL_MAX_RESTARTS", "2")
+HEAL_OUTAGE_THRESHOLD = env_int("HEAL_OUTAGE_THRESHOLD", "3")
 DEFAULT_SCHEDULE = os.environ.get("DEFAULT_SCHEDULE", "daily").strip()
 DRY_RUN = env_bool("DRY_RUN", "false")
 REPORT_ON_START = env_bool("REPORT_ON_START", "true")
@@ -249,8 +265,10 @@ def set_log_tz(tzs):
     LOG_TZ = zone(next(iter(set(tzs.values()))) if len(set(tzs.values())) == 1 else "UTC")
 
 
-# Coolify's status per service/application uuid from the last discover(), e.g. "running:healthy".
+# Coolify's status per service/application uuid from the last discover(), e.g. "running:healthy",
+# and the resources whose server Coolify can't reach (their status is stale then).
 STATUSES = {}
+SERVER_DOWN = set()
 
 # False when the last discover() missed data (a failed API or Docker call), so its result
 # mustn't be compared with earlier ones: a failed call would look like services disappearing.
@@ -292,6 +310,7 @@ def discover():
     names = {s["uuid"]: s.get("name") or s["uuid"] for s in services if s.get("uuid")}
     server_of = {s["uuid"]: s.get("server_id") for s in services if s.get("uuid")}
     statuses = {s["uuid"]: s.get("status") or "" for s in services if s.get("uuid")}
+    down = {s["uuid"] for s in services if s.get("uuid") and s.get("server_status") is False}
     kind = {uuid: "service" for uuid in names}
     # Docker Image applications: Coolify's /deploy pulls their image (other build packs would rebuild).
     st, apps = coolify("GET", "/applications")
@@ -302,6 +321,8 @@ def discover():
             names[a["uuid"]] = a.get("name") or a["uuid"]
             kind[a["uuid"]] = "application"
             statuses[a["uuid"]] = a.get("status") or ""
+            if a.get("server_status") is False:
+                down.add(a["uuid"])
 
     tzs = {}
     if not TZ_OVERRIDE:
@@ -390,6 +411,8 @@ def discover():
 
     STATUSES.clear()
     STATUSES.update(statuses)
+    SERVER_DOWN.clear()
+    SERVER_DOWN.update(down)
     DISCOVERY_COMPLETE = complete
     return found, sorted(ignored)
 
@@ -773,6 +796,128 @@ def watch_update(uuid, cfg, summary, now, state):
     state.setdefault("pending", {})[uuid] = {"name": cfg["name"], "summary": summary, "since": now}
 
 
+# ---------------------------------------------------------------- self-healing
+
+def status_broken(status):
+    """Unhealthy or degraded (partly exited, crash-looping, dead). Never exited/paused/starting/unknown,
+    which may be deliberate or just can't be judged, and never resources excluded from monitoring."""
+    return not status.endswith(":excluded") and (status.startswith("running:unhealthy") or status.startswith("degraded"))
+
+
+def part_broken(status):
+    """A single container of a service: failing its health check, crash-looping, or exited."""
+    return "unhealthy" in status or status.startswith(("restarting", "exited", "dead"))
+
+
+def deployment_running(cfg):
+    """True if Coolify has a deployment queued or in progress for this application (by name)."""
+    if cfg.get("kind") != "application":
+        return False
+    st, deployments = coolify("GET", "/deployments")
+    return st == 200 and isinstance(deployments, list) and any(d.get("application_name") == cfg["name"] for d in deployments)
+
+
+def heal_restart(uuid, cfg):
+    """Restart without pulling new images, only the failing parts of a service where they can be told apart.
+    Returns (what was restarted, [(HTTP status, response)])."""
+    if cfg.get("kind") == "application":
+        return "the application", [coolify("POST", f"/applications/{uuid}/restart")]
+    st, svc = coolify("GET", f"/services/{uuid}")
+    parts = []
+    if st == 200 and isinstance(svc, dict):
+        for key in ("applications", "databases"):
+            parts += [(key, p) for p in svc.get(key) or [] if p.get("uuid")]
+    broken = [(key, p) for key, p in parts if part_broken(p.get("status") or "")]
+    if not broken or len(broken) == len(parts):
+        return "the whole service", [coolify("POST", f"/services/{uuid}/restart")]
+    results = [coolify("POST", f"/services/{uuid}/{key}/{p['uuid']}/restart") for key, p in broken]
+    return ", ".join(p.get("name") or p["uuid"] for _, p in broken), results
+
+
+def heal(found, now, state):
+    """Restart opted-in resources that have been unhealthy or degraded for HEAL_AFTER minutes.
+
+    Skips our own service, resources with the health check turned off, anything with a post-update
+    check still running, resources on an unreachable server, and applications being deployed.
+    At most HEAL_MAX_RESTARTS per incident, HEAL_RETRY_AFTER minutes apart, then it gives up until
+    the resource has been healthy again. If HEAL_OUTAGE_THRESHOLD or more are broken at once, it only
+    notifies: that points to the server, and mass restarts would make it worse. One restart per minute."""
+    if not AUTO_HEAL or not DISCOVERY_COMPLETE:
+        return
+    incidents = state.setdefault("heal", {})
+    watched = {u: c for u, c in found.items()
+               if not c.get("self") and c.get("healthcheck") is not False and u not in SERVER_DOWN}
+    for uuid in list(incidents):
+        if uuid not in watched:
+            del incidents[uuid]
+
+    for uuid, cfg in watched.items():
+        status = STATUSES.get(uuid, "")
+        inc = incidents.setdefault(uuid, {"bad": 0, "ok": 0, "restarts": 0, "last": None, "gave_up": False})
+        if status_broken(status):
+            inc["bad"] += 1
+            inc["ok"] = 0
+            inc["status"] = status
+        elif status_ok(status):
+            inc["bad"] = 0
+            inc["ok"] += 1
+            if inc["ok"] >= 2 and (inc["restarts"] or inc["gave_up"]):
+                log(f"[{cfg['name']}] recovered: {status}")
+                notify(f"coolify-watchtower: \u2713 {cfg['name']} recovered",
+                       f"Healthy again after {inc['restarts']} restart(s). Coolify status: {status}")
+            if inc["ok"] >= 2:
+                incidents[uuid] = {"bad": 0, "ok": inc["ok"], "restarts": 0, "last": None, "gave_up": False}
+        else:
+            inc["bad"] = 0  # starting, exited, paused or unknown: not broken, but not proof of health either
+            inc["ok"] = 0
+
+    broken = [u for u in watched if incidents[u]["bad"] > 0]
+    if len(broken) >= HEAL_OUTAGE_THRESHOLD:
+        if not state.get("outage"):
+            state["outage"] = True
+            lines = [f"{watched[u]['name']}: {incidents[u]['status']}" for u in sorted(broken, key=lambda u: watched[u]["name"].lower())]
+            log(f"WARN {len(broken)} resources unhealthy at once - not restarting anything")
+            notify(f"coolify-watchtower: \u26a0 {len(broken)} services unhealthy at once",
+                   "\n".join(lines) + "\nNot restarting anything. This usually points to the server (disk, memory, network).")
+        return
+    state["outage"] = False
+
+    pending = state.get("pending", {})
+    for uuid in sorted(broken, key=lambda u: -incidents[u]["bad"]):
+        cfg, inc = watched[uuid], incidents[uuid]
+        if inc["gave_up"] or uuid in pending or inc["bad"] < HEAL_AFTER:
+            continue
+        if inc["last"] and (now - inc["last"]).total_seconds() < HEAL_RETRY_AFTER * 60:
+            continue
+        if inc["restarts"] >= HEAL_MAX_RESTARTS:
+            inc["gave_up"] = True
+            log(f"[{cfg['name']}] WARN still {inc['status']} after {inc['restarts']} restart(s) - giving up until it's healthy")
+            notify(f"coolify-watchtower: \u2717 {cfg['name']} still unhealthy after {inc['restarts']} restarts",
+                   f"Coolify status: {inc['status']}\nNot restarting it again until it has been healthy. It needs you.")
+            continue
+        if deployment_running(cfg):
+            continue
+        inc["restarts"] += 1
+        inc["last"] = now
+        attempt = f"attempt {inc['restarts']} of {HEAL_MAX_RESTARTS}"
+        if DRY_RUN:
+            log(f"[{cfg['name']}] DRY_RUN - {inc['status']} for {inc['bad']} min, would restart ({attempt})")
+            notify(f"coolify-watchtower (dry run): {cfg['name']} unhealthy", f"Coolify status: {inc['status']} for {inc['bad']} min\nWould restart it ({attempt}).")
+            break
+        what, results = heal_restart(uuid, cfg)
+        failed = [(st, data) for st, data in results if st not in (200, 201, 202)]
+        if failed:
+            st, data = failed[0]
+            reason = data.get("message") if isinstance(data, dict) else data
+            log(f"[{cfg['name']}] ERROR restart HTTP {st} {data}")
+            notify(f"coolify-watchtower: FAILED to restart {cfg['name']}", f"HTTP {st}: {reason}")
+        else:
+            log(f"[{cfg['name']}] {inc['status']} for {inc['bad']} min - restarting {what} ({attempt})")
+            notify(f"coolify-watchtower: \u26a0 {cfg['name']} unhealthy, restarting",
+                   f"Coolify status: {inc['status']} for {inc['bad']} min\nRestarting {what} ({attempt}).")
+        break  # one restart per minute
+
+
 def tick(now, state):
     """Run one minute. `now` must be timezone-aware; each schedule is evaluated in its own timezone."""
     result = discover()
@@ -805,6 +950,7 @@ def tick(now, state):
         summary = check_service(uuid, cfg, allow_restart=True)
         if summary:
             watch_update(uuid, cfg, summary, now, state)
+    heal(found, now, state)
 
 
 def main():
