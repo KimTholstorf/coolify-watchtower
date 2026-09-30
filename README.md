@@ -63,7 +63,7 @@ Open a service you want kept up to date, go to **Scheduled Tasks → New**, and 
 
 | Field | Value |
 |---|---|
-| Name | `auto-update` |
+| Name | `watchtower` |
 | Command | `true` |
 | Frequency | a cron schedule such as `30 4 * * *` (every day at 04:30), or `daily`, `weekly` |
 | Container | any container in the service that has `sh` |
@@ -75,19 +75,19 @@ The frequency uses cron syntax, the same as every scheduled task in Coolify, i.e
 Open coolify-watchtower's Runtime logs and expand Updater. Within a minute you'll see your service in the table, and at the scheduled time the result of each check:
 
 ```text
-coolify-watchtower 1.7.5 | coolify=http://coolify:8080 ... tz=from Coolify servers dry_run=False
+coolify-watchtower 1.8.0 | coolify=http://coolify:8080 ... tz=from Coolify servers dry_run=False
 Coolify API OK (version 4.3.23)
 Docker (socket proxy) OK
-Opted in with 'auto-update' task or 'coolify.auto-update' label:
-    NAME                TYPE  STATUS   VIA    SCHEDULE        TIMEZONE            UUID
-    coolify-watchtower  svc   enabled  self   daily           Europe/Copenhagen   udgv5xuy2niy...
-    uptime-kuma         svc   enabled  task   30 4 * * *      Europe/Copenhagen   c92huq7by0wp...
+Opted in with a 'watchtower' task or 'coolify.watchtower' label:
+    NAME                TYPE  STATUS   VIA    SCHEDULE        TIMEZONE            HEALTH  UUID
+    coolify-watchtower  svc   enabled  self   daily           Europe/Copenhagen   -       udgv5xuy2niy...
+    uptime-kuma         svc   enabled  task   30 4 * * *      Europe/Copenhagen   on      c92huq7by0wp...
 [uptime-kuma] uptime-kuma: louislam/uptime-kuma:2 UPDATE 2.5.4 -> 2.5.5 (917318f9d7be -> c74379ac4509)
 [uptime-kuma] update available (report only, no restart)
 Startup report done. Waiting for schedules.
 ```
 
-The check at startup only reports. Updates happen at the scheduled times. In the table, TYPE is `svc` for a service or `app` for a Docker Image application, and VIA says how it's opted in: a scheduled `task`, a `label`, or `self` for coolify-watchtower's own updates.
+The check at startup only reports. Updates happen at the scheduled times. In the table, TYPE is `svc` for a service or `app` for a Docker Image application, and VIA says how it's opted in: a scheduled `task`, a `label`, or `self` for coolify-watchtower's own updates. HEALTH says whether the service's status is checked after an update.
 
 ## Opting services in
 
@@ -106,7 +106,7 @@ If a service has both, the scheduled task wins.
 
 ### Coolify Scheduled Task
 
-This is the way shown in the [quick start](#3-opt-a-service-in). On the service, go to **Scheduled Tasks → New** and create a task named `auto-update` with the command `true`. The task's frequency is the update schedule, and its on/off switch pauses updates.
+This is the way shown in the [quick start](#3-opt-a-service-in). On the service, go to **Scheduled Tasks → New** and create a task named `watchtower` with the command `true`. The task's frequency is the update schedule, and its on/off switch pauses updates.
 
 The command `true` does nothing. Coolify runs it at the scheduled time in the container you pick, which is why that container needs `sh`. coolify-watchtower only reads the task's settings.
 
@@ -122,27 +122,42 @@ services:
   uptime-kuma:
     image: louislam/uptime-kuma:2
     labels:
-      - coolify.auto-update=30 4 * * *
+      - coolify.watchtower=30 4 * * *
 ```
 
 | Label | Schedule |
 |---|---|
-| `coolify.auto-update=30 4 * * *` | a cron schedule, here every day at 04:30 |
-| `coolify.auto-update=weekly` | one of the words below |
-| `coolify.auto-update` or `coolify.auto-update=true` | the default, `daily` (set with `DEFAULT_SCHEDULE`) |
-| `coolify.auto-update=false` | paused |
+| `coolify.watchtower=30 4 * * *` | a cron schedule, here every day at 04:30 |
+| `coolify.watchtower=weekly` | one of the words below |
+| `coolify.watchtower` or `coolify.watchtower=true` | the default, `daily` (set with `DEFAULT_SCHEDULE`) |
+| `coolify.watchtower=false` | paused |
 
 Docker only reads labels when it creates a container, so every change to the label needs a redeploy of the service.
 
 ### Schedules
 
-Schedules use cron syntax, like all scheduled tasks in Coolify: five fields for minute, hour, day of month, month and day of week. Awoid headackes and use [croncalculator.com](https://croncalculator.com/) to build one for you. Coolify's words work too: `hourly`, `daily`, `weekly`, `monthly` and `yearly`, where `daily` means midnight.
+Schedules use cron syntax, like all scheduled tasks in Coolify: five fields for minute, hour, day of month, month and day of week. Avoid headaches and use [croncalculator.com](https://croncalculator.com/) to build one for you. Coolify's words work too: `hourly`, `daily`, `weekly`, `monthly` and `yearly`, where `daily` means midnight.
 
 Schedules run in the timezone set for the server in Coolify (**Servers → General → Server Timezone**), the same as Coolify's own scheduled tasks.
 
+### Health check after updates
+
+After each update, coolify-watchtower checks the service's status in Coolify (see [Notifications](#notifications)). It's on by default. To turn it off for one service, for example one whose status in Coolify is never green:
+
+| Opted in with | Turn the health check off |
+|---|---|
+| Scheduled task | set the command to `true healthcheck=false` |
+| Label | add the label `coolify.watchtower.healthcheck=false` |
+
+`true` ignores what comes after it, so the task still succeeds. If both are set, the task's command wins.
+
+### Old names
+
+Earlier versions used the task name `auto-update` and the label `coolify.auto-update`. Both still work. The log and the update notifications remind you to rename them.
+
 ## Settings
 
-Only `COOLIFY_TOKEN` is required. `NOTIFY_URL` is highly recomended, unless you prefer keeping tabs on things via Coolify Runtime logs.
+Only `COOLIFY_TOKEN` is required. `NOTIFY_URL` is highly recommended, unless you prefer keeping tabs on things via Coolify Runtime logs.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -152,10 +167,19 @@ Only `COOLIFY_TOKEN` is required. `NOTIFY_URL` is highly recomended, unless you 
 | `SELF_UPDATE` | `daily` | when coolify-watchtower updates itself: a schedule, or `false` |
 | `TZ` | | leave empty to use each server's timezone from Coolify, or set one timezone for everything |
 | `COOLIFY_URL` | `http://coolify:8080` | Coolify's API address |
-| `TASK_NAME` | `auto-update` | name of the scheduled task that opts a service in |
-| `AUTO_UPDATE_LABEL` | `coolify.auto-update` | name of the label that opts a service in |
 | `DEFAULT_SCHEDULE` | `daily` | schedule used when a label is set to `true` |
 | `REPORT_ON_START` | `true` | check all opted-in services once at startup, report only |
+
+### Advanced settings
+
+These aren't in the compose file. To use one, add it to the updater's `environment:` in **Edit Compose File**.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `TASK_NAME` | `watchtower` | an extra scheduled task name that opts a service in |
+| `AUTO_UPDATE_LABEL` | `coolify.watchtower` | an extra label name that opts a service in |
+
+The standard names `watchtower` and `coolify.watchtower`, and the old ones, keep working either way.
 
 ## Notifications
 
@@ -173,6 +197,14 @@ coolify-watchtower: opt-ins changed
 + uptime-kuma (service): 30 4 * * * Europe/Copenhagen, via task
 ~ rejseliv.app: schedule */5 * * * * -> daily
 - old-app (application): no longer opted in
+```
+
+After each update, coolify-watchtower keeps an eye on the service's status in Coolify. You get one more message: healthy once it has been running without a failing health check for two checks in a row, or unhealthy if that hasn't happened within 10 minutes. There's no automatic rollback, so the warning tells you when to step in. Services without a health check of their own can only be reported as running.
+
+```text
+coolify-watchtower: ⚠ uptime-kuma looks unhealthy after the update
+Coolify status after 10 min: running:unhealthy
+louislam/uptime-kuma:2 2.5.4 -> 2.5.5
 ```
 
 - **Discord:** create a webhook in the channel (**Channel settings → Integrations → Webhooks**) and use its URL. Coolify's API can't post to the Discord channel you set up inside Coolify, so coolify-watchtower needs its own webhook.

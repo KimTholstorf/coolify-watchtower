@@ -2,9 +2,9 @@
 """coolify-watchtower - Coolify-native image auto-updater.
 
 A Coolify service or Docker Image application opts in either with a Scheduled Task named
-TASK_NAME (default "auto-update", command `true`), or with the container label
-AUTO_UPDATE_LABEL (default "coolify.auto-update") in its compose file, whose
-value is the schedule. The task wins if both exist.
+"watchtower" (command `true`, options as arguments: `true healthcheck=false`), or with the
+container label "coolify.watchtower", whose value is the schedule. The task wins if both exist.
+The legacy names "auto-update" and "coolify.auto-update" keep working.
 This service reads tasks via the Coolify API and labels via Docker, and when one is due it
 compares local image digests (read-only Docker via socket proxy) with the
 registry. Only if something changed does it call Coolify's
@@ -28,7 +28,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.7.5"
+VERSION = "1.8.0"
 
 
 def env_bool(name, default):
@@ -38,8 +38,19 @@ def env_bool(name, default):
 COOLIFY_URL = os.environ.get("COOLIFY_URL", "http://coolify:8080").rstrip("/")
 COOLIFY_TOKEN = os.environ.get("COOLIFY_TOKEN", "").strip()
 DOCKER_URL = os.environ.get("DOCKER_HOST", "tcp://socket-proxy:2375").replace("tcp://", "http://").rstrip("/")
-TASK_NAME = os.environ.get("TASK_NAME", "auto-update").strip().lower()
-AUTO_UPDATE_LABEL = os.environ.get("AUTO_UPDATE_LABEL", "coolify.auto-update").strip()
+# Opt-in names: a scheduled task named "watchtower" or the label "coolify.watchtower". The legacy
+# names "auto-update" / "coolify.auto-update" keep working, whatever TASK_NAME / AUTO_UPDATE_LABEL
+# say (older compose files set those to the legacy names). The two settings add a custom name.
+LEGACY_TASK, LEGACY_LABEL = "auto-update", "coolify.auto-update"
+TASK_NAME = os.environ.get("TASK_NAME", "watchtower").strip().lower()
+AUTO_UPDATE_LABEL = os.environ.get("AUTO_UPDATE_LABEL", "coolify.watchtower").strip()
+TASK_NAMES = {"watchtower", TASK_NAME, LEGACY_TASK}
+OPT_IN_LABELS = list(dict.fromkeys(["coolify.watchtower", AUTO_UPDATE_LABEL, LEGACY_LABEL]))  # first match wins
+# The check after an update is on unless this label (or `healthcheck=false` in the task command) turns it off.
+HEALTH_LABEL = "coolify.watchtower.healthcheck"
+# After an update: wait this long before trusting Coolify's status, and give up on "healthy" after this long.
+HEALTH_GRACE = 120
+HEALTH_TIMEOUT = 600
 DEFAULT_SCHEDULE = os.environ.get("DEFAULT_SCHEDULE", "daily").strip()
 DRY_RUN = env_bool("DRY_RUN", "false")
 REPORT_ON_START = env_bool("REPORT_ON_START", "true")
@@ -238,15 +249,37 @@ def set_log_tz(tzs):
     LOG_TZ = zone(next(iter(set(tzs.values()))) if len(set(tzs.values())) == 1 else "UTC")
 
 
+# Coolify's status per service/application uuid from the last discover(), e.g. "running:healthy".
+STATUSES = {}
+
 # False when the last discover() missed data (a failed API or Docker call), so its result
 # mustn't be compared with earlier ones: a failed call would look like services disappearing.
 DISCOVERY_COMPLETE = True
 
 
+def option_bool(value):
+    """'false'/'no'/'off'/'0' turn an option off; anything else (including empty) leaves it on."""
+    return (value or "").strip().lower() not in ("false", "no", "off", "0")
+
+
+def command_options(command):
+    """Options passed as key=value arguments to the task's no-op command: `true healthcheck=false`."""
+    return {k.strip().lower(): v for k, _, v in (a.partition("=") for a in (command or "").split()[1:]) if _}
+
+
+def legacy_note(cfg):
+    """A rename hint for resources opted in with a legacy name, or ''."""
+    if cfg.get("legacy") == "task":
+        return f"Note: rename the scheduled task '{LEGACY_TASK}' to 'watchtower'. The old name still works."
+    if cfg.get("legacy") == "label":
+        return f"Note: rename the label '{LEGACY_LABEL}' to 'coolify.watchtower'. The old name still works."
+    return ""
+
+
 def discover():
     """Return ({service_uuid: {name, frequency, enabled, source, timezone}}, [ignored container names]).
 
-    Opt-in is a scheduled task named TASK_NAME or a container carrying AUTO_UPDATE_LABEL.
+    Opt-in is a scheduled task named in TASK_NAMES or a container carrying one of OPT_IN_LABELS.
     The task wins over the label. Labelled containers outside any service are ignored.
     Schedules use TZ if set, else the timezone of the server the service runs on."""
     global DISCOVERY_COMPLETE
@@ -258,6 +291,7 @@ def discover():
         return None
     names = {s["uuid"]: s.get("name") or s["uuid"] for s in services if s.get("uuid")}
     server_of = {s["uuid"]: s.get("server_id") for s in services if s.get("uuid")}
+    statuses = {s["uuid"]: s.get("status") or "" for s in services if s.get("uuid")}
     kind = {uuid: "service" for uuid in names}
     # Docker Image applications: Coolify's /deploy pulls their image (other build packs would rebuild).
     st, apps = coolify("GET", "/applications")
@@ -267,6 +301,7 @@ def discover():
         if a.get("uuid") and a.get("build_pack") == "dockerimage":
             names[a["uuid"]] = a.get("name") or a["uuid"]
             kind[a["uuid"]] = "application"
+            statuses[a["uuid"]] = a.get("status") or ""
 
     tzs = {}
     if not TZ_OVERRIDE:
@@ -289,16 +324,21 @@ def discover():
         if st != 200 or not isinstance(tasks, list):
             complete = False
             continue
-        for t in tasks:
-            if (t.get("name") or "").strip().lower() == TASK_NAME:
-                found[uuid] = {
-                    "name": name,
-                    "frequency": t.get("frequency") or "",
-                    "enabled": bool(t.get("enabled", True)),
-                    "source": "task",
-                    "timezone": tz_for(uuid),
-                    "kind": kind[uuid],
-                }
+        ours = [t for t in tasks if (t.get("name") or "").strip().lower() in TASK_NAMES]
+        ours.sort(key=lambda t: (t.get("name") or "").strip().lower() == LEGACY_TASK)  # current name first
+        if ours:
+            t = ours[0]
+            found[uuid] = {
+                "name": name,
+                "frequency": t.get("frequency") or "",
+                "enabled": bool(t.get("enabled", True)),
+                "source": "task",
+                "timezone": tz_for(uuid),
+                "kind": kind[uuid],
+                "task_options": command_options(t.get("command")),
+            }
+            if (t.get("name") or "").strip().lower() == LEGACY_TASK:
+                found[uuid]["legacy"] = "task"
 
     try:
         containers = docker_get("/containers/json")
@@ -309,20 +349,24 @@ def discover():
     me = own_service(containers, names)
 
     ignored = []
-    if AUTO_UPDATE_LABEL:
-        for c in containers:
-            labels = c.get("Labels") or {}
-            if AUTO_UPDATE_LABEL not in labels:
-                continue
-            uuid = owner_uuid(c, names)
-            if not uuid:
-                ignored.append((c.get("Names") or ["?"])[0].lstrip("/"))
-                continue
-            if uuid in found or uuid == me:  # our own schedule comes from SELF_UPDATE
-                continue
-            frequency, enabled = label_schedule(labels[AUTO_UPDATE_LABEL])
-            found[uuid] = {"name": names[uuid], "frequency": frequency, "enabled": enabled, "source": "label",
-                           "timezone": tz_for(uuid), "kind": kind[uuid]}
+    for c in containers:
+        labels = c.get("Labels") or {}
+        label = next((l for l in OPT_IN_LABELS if l in labels), None)
+        if not label:
+            continue
+        uuid = owner_uuid(c, names)
+        if not uuid:
+            ignored.append((c.get("Names") or ["?"])[0].lstrip("/"))
+            continue
+        if uuid == me:  # our own schedule comes from SELF_UPDATE
+            continue
+        if uuid in found and not (found[uuid]["source"] == "label" and found[uuid].get("legacy") and label != LEGACY_LABEL):
+            continue  # a task wins; a current label wins over a legacy one on another container
+        frequency, enabled = label_schedule(labels[label])
+        found[uuid] = {"name": names[uuid], "frequency": frequency, "enabled": enabled, "source": "label",
+                       "timezone": tz_for(uuid), "kind": kind[uuid]}
+        if label == LEGACY_LABEL:
+            found[uuid]["legacy"] = "label"
 
     if me and me not in found:
         frequency, enabled = label_schedule(SELF_UPDATE)
@@ -330,12 +374,28 @@ def discover():
                      "timezone": tz_for(me), "kind": kind[me]}
     if me in found:
         found[me]["self"] = True
+
+    # Health check after updates: the task command's `healthcheck=` wins, then the label, else on.
+    health_labels = {}
+    for c in containers:
+        value = (c.get("Labels") or {}).get(HEALTH_LABEL)
+        uuid = owner_uuid(c, names) if value is not None else None
+        if uuid:
+            health_labels[uuid] = option_bool(value)
+    for uuid, cfg in found.items():
+        task_value = cfg.pop("task_options", {}).get("healthcheck")
+        cfg["healthcheck"] = option_bool(task_value) if task_value is not None else health_labels.get(uuid, True)
+        if cfg.get("legacy"):
+            warn_once(("legacy", uuid, cfg["legacy"]), f"[{cfg['name']}] {legacy_note(cfg)}")
+
+    STATUSES.clear()
+    STATUSES.update(statuses)
     DISCOVERY_COMPLETE = complete
     return found, sorted(ignored)
 
 
 def discover_unsupported_apps():
-    """Names of non-Docker-Image applications that carry an auto-update task (reported, not updated)."""
+    """Names of non-Docker-Image applications that carry a watchtower task (reported, not updated)."""
     st, apps = coolify("GET", "/applications")
     if st != 200 or not isinstance(apps, list):
         return []
@@ -345,7 +405,7 @@ def discover_unsupported_apps():
             continue  # supported
         st, tasks = coolify("GET", f"/applications/{a.get('uuid')}/scheduled-tasks")
         if st == 200 and isinstance(tasks, list):
-            if any((t.get("name") or "").strip().lower() == TASK_NAME for t in tasks):
+            if any((t.get("name") or "").strip().lower() in TASK_NAMES for t in tasks):
                 names.append(a.get("name") or a.get("uuid"))
     return names
 
@@ -579,7 +639,9 @@ def check_service(uuid, cfg, allow_restart):
     st, data = restart_resource(uuid, kind)
     if st in (200, 201, 202):
         log(f"[{name}] {action} queued")
-        notify(f"coolify-watchtower: updating {name}", summary)
+        note = legacy_note(cfg)
+        notify(f"coolify-watchtower: updating {name}", summary + (f"\n{note}" if note else ""))
+        return summary
     else:
         log(f"[{name}] ERROR {action} HTTP {st} {data}")
         reason = data.get("message") if isinstance(data, dict) else data
@@ -588,28 +650,31 @@ def check_service(uuid, cfg, allow_restart):
 
 def print_table(found, ignored):
     if ignored:
-        log(f"WARN label '{AUTO_UPDATE_LABEL}' on containers outside services and Docker Image "
+        log(f"WARN watchtower label on containers outside services and Docker Image "
             f"applications - ignored: {', '.join(ignored)}")
     if not found:
-        log(f"Nothing opted in: no scheduled task named '{TASK_NAME}' or label '{AUTO_UPDATE_LABEL}'.")
+        log("Nothing opted in: no scheduled task named 'watchtower' or label 'coolify.watchtower'.")
         return
-    log(f"Opted in with '{TASK_NAME}' task or '{AUTO_UPDATE_LABEL}' label:")
+    log("Opted in with a 'watchtower' task or 'coolify.watchtower' label:")
     width = max(len(v["name"]) for v in found.values())
 
     def row(*cols):
-        name, kind, status, via, schedule, tz, uuid = cols
-        print(f"    {name.ljust(width)}  {kind:<4}  {status:<7}  {via:<5}  {schedule:<14}  {tz:<18}  {uuid}", flush=True)
+        name, kind, status, via, schedule, tz, health, uuid = cols
+        print(f"    {name.ljust(width)}  {kind:<4}  {status:<7}  {via:<5}  {schedule:<14}  {tz:<18}  {health:<6}  {uuid}",
+              flush=True)
 
     # TYPE: svc = service, app = Docker Image application. VIA: task, label, or self (SELF_UPDATE).
-    row("NAME", "TYPE", "STATUS", "VIA", "SCHEDULE", "TIMEZONE", "UUID")
+    # HEALTH: whether the status is checked after an update.
+    row("NAME", "TYPE", "STATUS", "VIA", "SCHEDULE", "TIMEZONE", "HEALTH", "UUID")
     for uuid, v in sorted(found.items(), key=lambda kv: kv[1]["name"].lower()):
+        health = "-" if v.get("self") else ("on" if v.get("healthcheck", True) else "off")
         row(v["name"], "app" if v.get("kind") == "application" else "svc",
-            "enabled" if v["enabled"] else "paused", v["source"], v["frequency"], v["timezone"], uuid)
+            "enabled" if v["enabled"] else "paused", v["source"], v["frequency"], v["timezone"], health, uuid)
 
 
 # ---------------------------------------------------------------- opt-in change announcements
 
-WATCHED = ("name", "kind", "enabled", "source", "frequency", "timezone")
+WATCHED = ("name", "kind", "enabled", "source", "frequency", "timezone", "healthcheck")
 
 
 def snapshot(found):
@@ -623,7 +688,7 @@ def opt_in_changes(old, new):
     for uuid in sorted(new.keys() - old.keys(), key=by_name(new)):
         n = new[uuid]
         lines.append(f"+ {n['name']} ({n['kind']}): {n['frequency']} {n['timezone']}, via {n['source']}"
-                     + ("" if n["enabled"] else ", paused"))
+                     + ("" if n["enabled"] else ", paused") + ("" if n.get("healthcheck") is not False else ", no health check"))
     for uuid in sorted(old.keys() - new.keys(), key=by_name(old)):
         lines.append(f"- {old[uuid]['name']} ({old[uuid]['kind']}): no longer opted in")
     for uuid in sorted(old.keys() & new.keys(), key=by_name(new)):
@@ -639,6 +704,8 @@ def opt_in_changes(old, new):
             diffs.append("resumed" if n["enabled"] else "paused")
         if o["source"] != n["source"]:
             diffs.append(f"opted in via {o['source']} -> {n['source']}")
+        if (o.get("healthcheck") is not False) != (n.get("healthcheck") is not False):
+            diffs.append("health check " + ("off" if n.get("healthcheck") is False else "on"))
         if diffs:
             lines.append(f"~ {n['name']}: " + ", ".join(diffs))
     return lines
@@ -664,6 +731,48 @@ def announce_changes(found, state):
     state["last_snapshot"] = snap
 
 
+# ---------------------------------------------------------------- post-update health check
+
+def status_ok(status):
+    """Running and not unhealthy. 'running:unknown' (no health check) counts as ok."""
+    return status.startswith("running") and "unhealthy" not in status
+
+
+def follow_up_updates(now, state):
+    """After an update, watch the resource's Coolify status and report once: healthy (running and not
+    unhealthy in two checks in a row, after a grace period so the pre-restart status isn't trusted),
+    or unhealthy when HEALTH_TIMEOUT passes without that."""
+    pending = state.setdefault("pending", {})
+    for uuid, p in list(pending.items()):
+        elapsed = (now - p["since"]).total_seconds()
+        if elapsed < HEALTH_GRACE:
+            continue
+        status = STATUSES.get(uuid, "")
+        p["ok"] = p.get("ok", 0) + 1 if status_ok(status) else 0
+        p["last"] = status or "not found"
+        if p["ok"] >= 2:
+            note = " (no health check, so only running is known)" if "unknown" in status else ""
+            log(f"[{p['name']}] healthy after the update: {status}{note}")
+            notify(f"coolify-watchtower: \u2713 {p['name']} is healthy after the update", p["summary"] + note)
+            del pending[uuid]
+        elif elapsed >= HEALTH_TIMEOUT:
+            minutes = round(elapsed / 60)
+            log(f"[{p['name']}] WARN still not healthy {minutes} min after the update: {p['last']}")
+            notify(f"coolify-watchtower: \u26a0 {p['name']} looks unhealthy after the update",
+                   f"Coolify status after {minutes} min: {p['last']}\n{p['summary']}")
+            del pending[uuid]
+
+
+def watch_update(uuid, cfg, summary, now, state):
+    """Register a queued update for the health follow-up, unless opted out or it's ourselves."""
+    if cfg.get("self"):
+        return  # we're the one being restarted
+    if not cfg.get("healthcheck", True):
+        log(f"[{cfg['name']}] no health check after the update (turned off for this service)")
+        return
+    state.setdefault("pending", {})[uuid] = {"name": cfg["name"], "summary": summary, "since": now}
+
+
 def tick(now, state):
     """Run one minute. `now` must be timezone-aware; each schedule is evaluated in its own timezone."""
     result = discover()
@@ -675,6 +784,7 @@ def tick(now, state):
         state["fingerprint"] = fingerprint
         print_table(found, ignored)
     announce_changes(found, state)
+    follow_up_updates(now, state)
     due = []
     for uuid, cfg in found.items():
         if not cfg["enabled"]:
@@ -692,7 +802,9 @@ def tick(now, state):
     for uuid in due:
         cfg = found[uuid]
         log(f"[{cfg['name']}] schedule '{cfg['frequency']}' ({cfg['timezone']}) due - checking")
-        check_service(uuid, cfg, allow_restart=True)
+        summary = check_service(uuid, cfg, allow_restart=True)
+        if summary:
+            watch_update(uuid, cfg, summary, now, state)
 
 
 def main():

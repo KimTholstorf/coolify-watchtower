@@ -12,8 +12,6 @@ services:
       - COOLIFY_TOKEN=${COOLIFY_TOKEN}
       - DRY_RUN=${DRY_RUN:-false}
       - TZ=${TZ:-}
-      - TASK_NAME=${TASK_NAME:-auto-update}
-      - AUTO_UPDATE_LABEL=${AUTO_UPDATE_LABEL:-coolify.auto-update}
       - DEFAULT_SCHEDULE=${DEFAULT_SCHEDULE:-daily}
       - REPORT_ON_START=${REPORT_ON_START:-true}
       - NOTIFY_URL=${NOTIFY_URL:-}

@@ -13,7 +13,7 @@ Full documentation, source and issues: **[github.com/KimTholstorf/coolify-watcht
 1. In Coolify, enable **API access** in the settings and create an API token with the `read` and `deploy` permissions.
 2. Go to **+ New Resource → Docker Compose (empty)** and paste [`docker-compose.dockerhub.yml`](https://github.com/KimTholstorf/coolify-watchtower/blob/main/docker-compose.dockerhub.yml). Leave **Connect to Predefined Network** off.
 3. Set `COOLIFY_TOKEN` under **Environment Variables** and deploy. Everything else has a default.
-4. On each service you want kept up to date, add a scheduled task named `auto-update` with the command `true`. Its frequency is the update schedule, e.g. `30 4 * * *` for every day at 04:30.
+4. On each service you want kept up to date, add a scheduled task named `watchtower` with the command `true`. Its frequency is the update schedule, e.g. `30 4 * * *` for every day at 04:30.
 
 Services (compose and one-click) and Docker Image applications are supported. Notifications can go to Discord or ntfy, and coolify-watchtower keeps itself up to date too.
 

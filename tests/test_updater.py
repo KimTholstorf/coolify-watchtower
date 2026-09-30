@@ -50,9 +50,9 @@ class H(BaseHTTPRequestHandler):
         p=self.path
         if p=="/api/v1/version":  # real Coolify answers with plain text, not JSON
             self.send_response(200); self.send_header("Content-Type","text/html"); self.end_headers(); return self.wfile.write(b"4.2.1")
-        if p=="/api/v1/services": return self.send([{"uuid":"svc1","name":"uptime-kuma","server_id":0},{"uuid":"svc2","name":"pocket-id","server_id":0},{"uuid":"svc3","name":"vaultwarden","server_id":1},{"uuid":"svc4","name":"gotify","server_id":0}])
+        if p=="/api/v1/services": return self.send([{"uuid":"svc1","name":"uptime-kuma","server_id":0,"status":"running:healthy"},{"uuid":"svc2","name":"pocket-id","server_id":0},{"uuid":"svc3","name":"vaultwarden","server_id":1},{"uuid":"svc4","name":"gotify","server_id":0}])
         if p=="/api/v1/services/svc1/scheduled-tasks": return self.send([{"name":"auto-update","frequency":"30 4 * * *","enabled":True}])
-        if p=="/api/v1/services/svc2/scheduled-tasks": return self.send([{"name":"Auto-Update","frequency":"daily","enabled":False}])
+        if p=="/api/v1/services/svc2/scheduled-tasks": return self.send([{"name":"Auto-Update","frequency":"hourly","enabled":True,"command":"true"},{"name":"Watchtower","frequency":"daily","enabled":False,"command":"true healthcheck=false"}])
         if p in ("/api/v1/services/svc3/scheduled-tasks","/api/v1/services/svc4/scheduled-tasks"): return self.send([])
         if p=="/api/v1/servers": return self.send([{"name":"localhost","settings":{"server_id":0,"server_timezone":"Europe/Copenhagen"}},{"name":"remote","settings":{"server_id":1,"server_timezone":"America/New_York"}}])
         if p=="/api/v1/applications": return self.send([{"uuid":"app1","name":"myapp","build_pack":"nixpacks"},{"uuid":"app2","name":"kuma-app","build_pack":"dockerimage"}])
@@ -60,7 +60,7 @@ class H(BaseHTTPRequestHandler):
         if p=="/api/v1/applications/app1/scheduled-tasks": return self.send([{"name":"auto-update","frequency":"daily"}])
         if p=="/version": return self.send({"Version":"28"})
         if p=="/containers/json": return self.send([{"Id":"c1","Names":["/uptime-kuma-svc1"],"Labels":{"com.docker.compose.project":"svc1","coolify.auto-update":"false"}},{"Id":"c2","Names":["/other"],"Labels":{}},
-            {"Id":"c3","Names":["/vaultwarden-svc3"],"Labels":{"com.docker.compose.project":"svc3","coolify.auto-update":"*/5 * * * *"}},
+            {"Id":"c3","Names":["/vaultwarden-svc3"],"Labels":{"com.docker.compose.project":"svc3","coolify.watchtower":"*/5 * * * *","coolify.watchtower.healthcheck":"False"}},
             {"Id":"c4","Names":["/gotify-svc4"],"Labels":{"com.docker.compose.project":"svc4","coolify.auto-update":"true"}},
             {"Id":"c5","Names":["/myapp-app1"],"Labels":{"coolify.applicationId":"1","coolify.auto-update":"true"}},
             {"Id":"c6","Names":["/app2-20260928T111330"],"Labels":{"coolify.applicationId":"2","coolify.type":"application"}}])
@@ -79,7 +79,7 @@ u.tag_versions = lambda registry, repo, digests: {"sha256:bbbbbbbbbbbbbbbbbb": "
 st={}
 found, ignored = u.discover()
 assert found["svc1"]["source"]=="task" and found["svc1"]["enabled"]  # task wins over label=false
-assert found["svc3"]=={"name":"vaultwarden","frequency":"*/5 * * * *","enabled":True,"source":"label","timezone":"Europe/Copenhagen","kind":"service"}  # TZ override
+assert found["svc3"]=={"name":"vaultwarden","frequency":"*/5 * * * *","enabled":True,"source":"label","timezone":"Europe/Copenhagen","kind":"service","healthcheck":False}  # TZ override
 assert found["svc4"]["frequency"]=="daily" and "svc2" in found
 assert ignored==["myapp-app1"]
 CPH = u.zone("Europe/Copenhagen")
@@ -157,5 +157,59 @@ u.announce_changes({}, st2); u.announce_changes({}, st2)
 assert len(sent) == 1, sent
 u.DISCOVERY_COMPLETE = True
 u.notify = orig_notify
+# Post-update health check
+u.socket.gethostname = lambda: "not-a-container"  # earlier tests made svc1 our own service
+found, _ = u.discover()
+assert found["svc3"]["healthcheck"] is False and "legacy" not in found["svc3"]  # coolify.watchtower.healthcheck=false
+assert found["svc1"]["healthcheck"] is True and found["svc1"]["legacy"] == "task"  # legacy task name "auto-update"
+assert found["svc4"]["legacy"] == "label"                                          # legacy label coolify.auto-update
+# svc2 has both a legacy and a current task: the current one wins, with its command option
+assert found["svc2"]["frequency"] == "daily" and "legacy" not in found["svc2"] and found["svc2"]["healthcheck"] is False, found["svc2"]
+assert u.STATUSES["svc1"] == "running:healthy"
+assert u.status_ok("running:healthy") and u.status_ok("running:unknown") and u.status_ok("running:healthy:excluded")
+assert not u.status_ok("running:unhealthy") and not u.status_ok("exited") and not u.status_ok("degraded:unhealthy") and not u.status_ok("")
+
+from datetime import timedelta
+sent = []; orig_notify = u.notify; u.notify = lambda title, body: sent.append((title, body))
+T0 = datetime(2026, 9, 29, 4, 30, tzinfo=u.zone("UTC"))
+hs = {}
+u.watch_update("svc3", found["svc3"], "x 1 -> 2", T0, hs)                  # opted out
+u.watch_update("me", {"name": "cw", "self": True}, "x", T0, hs)            # ourselves
+assert hs.get("pending", {}) == {}
+u.watch_update("svc1", found["svc1"], "louislam/uptime-kuma:2 2.5.4 -> 2.5.5", T0, hs)
+u.STATUSES.clear(); u.STATUSES.update({"svc1": "running:healthy"})      # stale pre-restart status
+u.follow_up_updates(T0 + timedelta(minutes=1), hs)                        # within the grace period: ignored
+assert sent == [] and "svc1" in hs["pending"], (sent, hs)
+u.follow_up_updates(T0 + timedelta(minutes=2), hs)                        # first ok
+assert sent == []
+u.follow_up_updates(T0 + timedelta(minutes=3), hs)                        # second ok in a row: healthy
+assert len(sent) == 1 and "healthy after the update" in sent[0][0] and "2.5.5" in sent[0][1], sent
+assert "svc1" not in hs["pending"]
+
+sent.clear()
+u.watch_update("svc1", found["svc1"], "louislam/uptime-kuma:2 2.5.4 -> 2.5.5", T0, hs)
+u.STATUSES.update({"svc1": "running:unhealthy"})
+for m in range(2, 10):
+    u.follow_up_updates(T0 + timedelta(minutes=m), hs)
+assert sent == []
+u.follow_up_updates(T0 + timedelta(minutes=10), hs)                       # timeout: unhealthy
+assert len(sent) == 1 and "unhealthy after the update" in sent[0][0] and "running:unhealthy" in sent[0][1], sent
+
+sent.clear()
+u.watch_update("svc1", found["svc1"], "x", T0, hs)
+u.STATUSES.update({"svc1": "running:unknown"})                            # no health check defined
+u.follow_up_updates(T0 + timedelta(minutes=2), hs); u.follow_up_updates(T0 + timedelta(minutes=3), hs)
+assert "no health check" in sent[0][1], sent
+u.notify = orig_notify
+# Names and options
+assert u.command_options("true healthcheck=false") == {"healthcheck": "false"}
+assert u.command_options("true") == {} and u.command_options("") == {}
+assert u.command_options("true Healthcheck=OFF foo") == {"healthcheck": "OFF"}
+assert u.option_bool("false") is False and u.option_bool("OFF") is False and u.option_bool("true") is True and u.option_bool("") is True
+assert "rename the scheduled task 'auto-update' to 'watchtower'" in u.legacy_note({"legacy": "task"})
+assert "rename the label 'coolify.auto-update' to 'coolify.watchtower'" in u.legacy_note({"legacy": "label"})
+assert u.legacy_note({}) == ""
+assert {"watchtower", "auto-update"} <= u.TASK_NAMES and u.OPT_IN_LABELS[0] == "coolify.watchtower"
+assert u.opt_in_changes({"a": A}, {"a": dict(A, healthcheck=False)}) == ["~ kuma: health check off"]
 print("apps:", u.discover_unsupported_apps())
 print("harness ok")
