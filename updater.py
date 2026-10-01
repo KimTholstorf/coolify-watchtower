@@ -28,7 +28,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.8.8"
+VERSION = "1.8.9"
 
 
 def env_bool(name, default):
@@ -151,25 +151,41 @@ def http(method, url, headers=None, data=None, timeout=20):
 DISCORD_WEBHOOK = re.compile(r"https://([a-z]+\.)?discord(app)?\.com/api/webhooks/")
 
 
-def notify_request(url, title, body):
-    """Headers and payload for NOTIFY_URL: JSON for a Discord webhook, plain text otherwise (ntfy style)."""
+# Embed colours by level: info blue, success green, warning orange,
+# error red, change (opt-ins) purple.
+LEVEL_COLORS = {"info": 0x3B82F6, "success": 0x22C55E, "warning": 0xF59E0B, "error": 0xEF4444, "change": 0x8B5CF6}
+
+
+def notify_request(url, title, body, level="info", note=""):
+    """Headers and payload for NOTIFY_URL: a Discord embed (coloured by level) for a Discord webhook,
+    plain text otherwise (ntfy style)."""
     # Discord sits behind Cloudflare, which rejects urllib's default User-Agent.
     headers = {"User-Agent": f"coolify-watchtower/{VERSION}"}
     if DISCORD_WEBHOOK.match(url):
-        content = f"**{title}**\n```\n{body}\n```"
-        if len(content) > 2000:  # Discord's message limit
-            content = content[:1990] + "\n...```"
+        description = f"```\n{body}\n```" if body else ""
+        if len(description) > 4000:  # Discord's embed description limit is 4096
+            description = description[:3990] + "\n...```"
+        embed = {
+            "title": title[:256],
+            "description": description,
+            "color": LEVEL_COLORS.get(level, LEVEL_COLORS["info"]),
+            "footer": {"text": f"coolify-watchtower {VERSION}"},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        if note:
+            embed["fields"] = [{"name": "Note", "value": note[:1024]}]
         headers["Content-Type"] = "application/json"
-        return headers, json.dumps({"content": content, "allowed_mentions": {"parse": []}}).encode()
-    headers.update({"Title": title, "Content-Type": "text/plain"})
-    return headers, body.encode()
+        return headers, json.dumps({"embeds": [embed], "allowed_mentions": {"parse": []}}).encode()
+    headers.update({"Title": f"coolify-watchtower: {title}", "Content-Type": "text/plain"})
+    text = "\n".join(t for t in (body, note) if t)
+    return headers, text.encode()
 
 
-def notify(title, body):
+def notify(title, body="", level="info", note=""):
     if not NOTIFY_URL:
         return
     try:
-        headers, data = notify_request(NOTIFY_URL, title, body)
+        headers, data = notify_request(NOTIFY_URL, title, body, level, note)
         st, _, resp = http("POST", NOTIFY_URL, headers, data)
         if st >= 300:
             log(f"WARN notify HTTP {st}: {resp[:200]!r}")
@@ -299,6 +315,10 @@ def resource_ok(uuid):
 # False when the last discover() missed data (a failed API or Docker call), so its result
 # mustn't be compared with earlier ones: a failed call would look like services disappearing.
 DISCOVERY_COMPLETE = True
+
+
+def plural(n, word):
+    return f"{n} {word}" + ("" if n == 1 else "s")
 
 
 def option_bool(value):
@@ -685,18 +705,18 @@ def check_service(uuid, cfg, allow_restart):
     action = "restart?latest=true" if kind == "service" else "deploy"
     if DRY_RUN:
         log(f"[{name}] DRY_RUN - would call {action}")
-        notify(f"coolify-watchtower (dry run): {name}", summary)
+        notify(f"Dry run: {name} has an update", summary, "info")
         return
     st, data = restart_resource(uuid, kind)
     if st in (200, 201, 202):
         log(f"[{name}] {action} queued")
         note = legacy_note(cfg)
-        notify(f"coolify-watchtower: updating {name}", summary + (f"\n{note}" if note else ""))
+        notify(f"Updating {name}", summary, "info", note)
         return summary
     else:
         log(f"[{name}] ERROR {action} HTTP {st} {data}")
         reason = data.get("message") if isinstance(data, dict) else data
-        notify(f"coolify-watchtower: FAILED {name}", f"HTTP {st}: {reason}\n{summary}")
+        notify(f"Updating {name} failed", f"HTTP {st}: {reason}\n{summary}", "error")
 
 
 def print_table(found, ignored):
@@ -777,7 +797,7 @@ def announce_changes(found, state):
         lines = opt_in_changes(state["announced"], snap)
         for line in lines:
             log(f"Opt-in change: {line}")
-        notify("coolify-watchtower: opt-ins changed", "\n".join(lines))
+        notify("Opt-ins changed", "\n".join(lines), "change")
         state["announced"] = snap
     state["last_snapshot"] = snap
 
@@ -806,13 +826,13 @@ def follow_up_updates(now, state):
         if p["ok"] >= 2:
             note = " (no health check, so only running is known)" if "unknown" in status else ""
             log(f"[{p['name']}] healthy after the update: {status}{note}")
-            notify(f"coolify-watchtower: \u2713 {p['name']} is healthy after the update", p["summary"] + note)
+            notify(f"\u2713 {p['name']} is healthy after the update", p["summary"] + note, "success")
             del pending[uuid]
         elif elapsed >= HEALTH_TIMEOUT:
             minutes = round(elapsed / 60)
             log(f"[{p['name']}] WARN still not healthy {minutes} min after the update: {p['last']}")
-            notify(f"coolify-watchtower: \u26a0 {p['name']} looks unhealthy after the update",
-                   f"Coolify status after {minutes} min: {p['last']}\n{p['summary']}")
+            notify(f"\u26a0 {p['name']} looks unhealthy after the update",
+                   f"Coolify status after {minutes} min: {p['last']}\n{p['summary']}", "warning")
             del pending[uuid]
 
 
@@ -898,8 +918,9 @@ def heal(found, now, state):
             inc["ok"] += 1
             if inc["ok"] >= 2 and (inc["restarts"] or inc["gave_up"]):
                 log(f"[{cfg['name']}] recovered: {status}")
-                notify(f"coolify-watchtower: \u2713 {cfg['name']} recovered",
-                       f"Healthy again after {inc['restarts']} restart(s). Coolify status: {status}")
+                how = (f"Healthy again after the update.\n{inc['updated']}" if inc.get("updated")
+                       else f"Healthy again after {plural(inc['restarts'], 'restart')}.")
+                notify(f"\u2713 {cfg['name']} recovered", f"{how}\nCoolify status: {status}", "success")
             if inc["ok"] >= 2:
                 incidents[uuid] = {"bad": 0, "ok": inc["ok"], "restarts": 0, "last": None, "gave_up": False}
         else:
@@ -912,8 +933,9 @@ def heal(found, now, state):
             state["outage"] = True
             lines = [f"{watched[u]['name']}: {incidents[u]['status']}" for u in sorted(broken, key=lambda u: watched[u]["name"].lower())]
             log(f"WARN {len(broken)} resources unhealthy at once - not restarting anything")
-            notify(f"coolify-watchtower: \u26a0 {len(broken)} services unhealthy at once",
-                   "\n".join(lines) + "\nNot restarting anything. This usually points to the server (disk, memory, network).")
+            notify(f"\u26a0 {len(broken)} services unhealthy at once",
+                   "\n".join(lines) + "\nNot restarting anything. This usually points to the server (disk, memory, network).",
+                   "error")
         return
     state["outage"] = False
 
@@ -926,9 +948,10 @@ def heal(found, now, state):
             continue
         if inc["restarts"] >= HEAL_MAX_RESTARTS:
             inc["gave_up"] = True
-            log(f"[{cfg['name']}] WARN still {inc['status']} after {inc['restarts']} restart(s) - giving up until it's healthy")
-            notify(f"coolify-watchtower: \u2717 {cfg['name']} still unhealthy after {inc['restarts']} restarts",
-                   f"Coolify status: {inc['status']}\nNot restarting it again until it has been healthy. It needs you.")
+            log(f"[{cfg['name']}] WARN still {inc['status']} after {plural(inc['restarts'], 'restart')} - giving up until it's healthy")
+            notify(f"\u2717 {cfg['name']} still unhealthy after {plural(inc['restarts'], 'restart')}",
+                   f"Coolify status: {inc['status']}\nNot restarting it again until it has been healthy. It needs you.",
+                   "error")
             continue
         if deployment_running(cfg):
             continue
@@ -937,7 +960,8 @@ def heal(found, now, state):
         attempt = f"attempt {inc['restarts']} of {HEAL_MAX_RESTARTS}"
         if DRY_RUN:
             log(f"[{cfg['name']}] DRY_RUN - {inc['status']} for {inc['bad']} min, would restart ({attempt})")
-            notify(f"coolify-watchtower (dry run): {cfg['name']} unhealthy", f"Coolify status: {inc['status']} for {inc['bad']} min\nWould restart it ({attempt}).")
+            notify(f"Dry run: {cfg['name']} unhealthy",
+                   f"Coolify status: {inc['status']} for {inc['bad']} min\nWould restart it ({attempt}).", "warning")
             break
         what, results = heal_restart(uuid, cfg)
         failed = [(st, data) for st, data in results if st not in (200, 201, 202)]
@@ -945,11 +969,11 @@ def heal(found, now, state):
             st, data = failed[0]
             reason = data.get("message") if isinstance(data, dict) else data
             log(f"[{cfg['name']}] ERROR restart HTTP {st} {data}")
-            notify(f"coolify-watchtower: FAILED to restart {cfg['name']}", f"HTTP {st}: {reason}")
+            notify(f"Restarting {cfg['name']} failed", f"HTTP {st}: {reason}", "error")
         else:
             log(f"[{cfg['name']}] {inc['status']} for {inc['bad']} min - restarting {what} ({attempt})")
-            notify(f"coolify-watchtower: \u26a0 {cfg['name']} unhealthy, restarting",
-                   f"Coolify status: {inc['status']} for {inc['bad']} min\nRestarting {what} ({attempt}).")
+            notify(f"\u26a0 {cfg['name']} unhealthy, restarting",
+                   f"Coolify status: {inc['status']} for {inc['bad']} min\nRestarting {what} ({attempt}).", "warning")
         break  # one restart per minute
 
 
@@ -985,6 +1009,9 @@ def tick(now, state):
         summary = check_service(uuid, cfg, allow_restart=True)
         if summary:
             watch_update(uuid, cfg, summary, now, state)
+            inc = state.get("heal", {}).get(uuid)
+            if inc and (inc["restarts"] or inc["gave_up"]):
+                inc["updated"] = summary  # so "recovered" credits the update, not the restarts
     heal(found, now, state)
 
 

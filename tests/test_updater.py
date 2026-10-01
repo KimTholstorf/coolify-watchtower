@@ -27,12 +27,19 @@ assert u.label_schedule("true") == ("daily", True) and u.label_schedule("") == (
 assert u.label_schedule("*/5 * * * *") == ("*/5 * * * *", True)
 assert u.label_schedule("false")[1] is False
 # notification payloads
-h, b = u.notify_request("https://discord.com/api/webhooks/1/abc", "t", "nginx:1 -> 2")
-assert h["Content-Type"] == "application/json" and json.loads(b) == {"content": "**t**\n```\nnginx:1 -> 2\n```", "allowed_mentions": {"parse": []}}
+h, b = u.notify_request("https://discord.com/api/webhooks/1/abc", "Updating kuma", "nginx:1 -> 2", "success", "rename it")
+payload = json.loads(b); e = payload["embeds"][0]
+assert h["Content-Type"] == "application/json" and payload["allowed_mentions"] == {"parse": []}
+assert e["title"] == "Updating kuma" and e["description"] == "```\nnginx:1 -> 2\n```" and e["color"] == u.LEVEL_COLORS["success"]
+assert "url" not in e and e["fields"] == [{"name": "Note", "value": "rename it"}] and "coolify-watchtower" in e["footer"]["text"]
+e = json.loads(u.notify_request("https://discord.com/api/webhooks/1/abc", "t", "x")[1])["embeds"][0]
+assert "url" not in e and "fields" not in e and e["color"] == u.LEVEL_COLORS["info"]
 assert u.notify_request("https://ptb.discordapp.com/api/webhooks/1/abc", "t", "x")[0]["Content-Type"] == "application/json"
-assert len(json.loads(u.notify_request("https://discord.com/api/webhooks/1/a", "t", "x" * 5000)[1])["content"]) <= 2000
-h, b = u.notify_request("https://ntfy.sh/topic", "t", "body")
-assert h["Title"] == "t" and h["Content-Type"] == "text/plain" and b == b"body"
+assert len(json.loads(u.notify_request("https://discord.com/api/webhooks/1/a", "t", "x" * 5000)[1])["embeds"][0]["description"]) <= 4096
+h, b = u.notify_request("https://ntfy.sh/topic", "t", "body", "error", "a note")
+assert h["Title"] == "coolify-watchtower: t" and h["Content-Type"] == "text/plain"
+assert b == b"body\na note"
+assert u.plural(1, "restart") == "1 restart" and u.plural(2, "restart") == "2 restarts"
 assert u.notify_request("https://example.com/?next=https://discord.com/api/webhooks/1/a", "t", "x")[0]["Content-Type"] == "text/plain"
 # version tags
 assert u.best_version_tag(["latest", "4", "4.3.3"]) == "4.3.3"
@@ -141,7 +148,7 @@ assert u.opt_in_changes({"a": A}, {"a": dict(A, frequency="*/5 * * * *", enabled
 assert u.opt_in_changes({"a": A}, {"a": dict(A, source="label")}) == ["~ kuma: opted in via task -> label"]
 assert u.opt_in_changes({"a": A}, {"a": A}) == []
 
-sent = []; orig_notify = u.notify; u.notify = lambda title, body: sent.append(body)
+sent = []; orig_notify = u.notify; u.notify = lambda title, body="", *a, **k: sent.append(body)
 st2 = {}
 u.DISCOVERY_COMPLETE = True
 u.announce_changes({"a": A}, st2)                # startup: baseline only
@@ -173,7 +180,7 @@ assert u.status_ok("running:healthy") and u.status_ok("running:unknown") and u.s
 assert not u.status_ok("running:unhealthy") and not u.status_ok("exited") and not u.status_ok("degraded:unhealthy") and not u.status_ok("")
 
 from datetime import timedelta
-sent = []; orig_notify = u.notify; u.notify = lambda title, body: sent.append((title, body))
+sent = []; orig_notify = u.notify; u.notify = lambda title, body="", *a, **k: sent.append((title, body))
 T0 = datetime(2026, 9, 29, 4, 30, tzinfo=u.zone("UTC"))
 hs = {}
 u.watch_update("svc3", found["svc3"], "x 1 -> 2", T0, hs)                  # opted out
@@ -220,7 +227,7 @@ for ok in ("running:healthy", "running:unknown", "exited", "paused:unknown", "st
     assert not u.status_broken(ok), ok
 assert u.part_broken("running:unhealthy") and u.part_broken("restarting:unknown") and u.part_broken("exited") and not u.part_broken("running:healthy")
 
-sent = []; orig_notify = u.notify; u.notify = lambda title, body: sent.append(title)
+sent = []; orig_notify = u.notify; u.notify = lambda title, body="", *a, **k: sent.append(title)
 svc = lambda name, **kw: dict({"name": name, "kind": "service", "enabled": True, "source": "task", "frequency": "daily", "timezone": "UTC", "healthcheck": True}, **kw)
 hfound = {"svc1": svc("immich"), "svc4": svc("gotify"), "svc2": svc("off", healthcheck=False), "me": svc("cw", self=True)}
 T0 = datetime(2026, 9, 30, 12, 0, tzinfo=u.zone("UTC"))
@@ -246,6 +253,20 @@ assert minute(60, bad, hs) == []                                     # given up:
 ok = dict(bad, svc1="running:healthy")
 minute(61, ok, hs); minute(62, ok, hs)
 assert "recovered" in sent[-1] and hs["heal"]["svc1"]["restarts"] == 0, sent
+bodies = []; u.notify = lambda title, body="", *a, **k: (sent.append(title), bodies.append(body))
+hs = {}                                                              # a new release fixed it: credit the update
+for m in range(5):
+    minute(m, bad, hs)
+assert hs["heal"]["svc1"]["restarts"] == 1
+hs["heal"]["svc1"]["updated"] = "immich: 1.0 -> 1.1"
+minute(10, ok, hs); minute(11, ok, hs)
+assert "recovered" in sent[-1] and bodies[-1].startswith("Healthy again after the update.\nimmich: 1.0 -> 1.1"), bodies
+hs = {}                                                              # one restart fixed it: singular
+for m in range(5):
+    minute(m, bad, hs)
+minute(10, ok, hs); minute(11, ok, hs)
+assert bodies[-1].startswith("Healthy again after 1 restart."), bodies
+u.notify = lambda title, body="", *a, **k: sent.append(title)
 
 sent.clear(); hs = {}                                                # starting/exited are never restarted
 for m in range(10):
@@ -291,7 +312,7 @@ del os.environ["TASK_NAME"]
 assert u.leftover_warnings() == []
 # Regression (seen on a real server): during the health-check start period Coolify reports
 # "running:healthy", which gave a false "healthy after the update" and false "recovered" resets.
-sent = []; orig_notify = u.notify; u.notify = lambda title, body: sent.append(title)
+sent = []; orig_notify = u.notify; u.notify = lambda title, body="", *a, **k: sent.append(title)
 T0 = datetime(2026, 10, 1, 0, 0, tzinfo=u.zone("UTC"))
 cfg = {"name": "testbed", "kind": "service", "healthcheck": True}
 def at(minute, status, docker, st, f):

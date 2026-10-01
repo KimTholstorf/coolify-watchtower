@@ -211,14 +211,14 @@ The standard names `watchtower` and `coolify.watchtower`, and the old ones, keep
 Set `NOTIFY_URL` and you get a message when an update is started, when a restart fails (with Coolify's reason), and, in dry-run mode, when an update is available.
 
 ```text
-coolify-watchtower: updating uptime-kuma
+Updating uptime-kuma
 louislam/uptime-kuma:2 2.5.4 -> 2.5.5
 ```
 
 You also get a message when the list of opted-in services changes: one is added or removed, its schedule changes, or it's paused or resumed. coolify-watchtower waits until a change has held for a minute, so a service restarting doesn't count as removed and added again.
 
 ```text
-coolify-watchtower: opt-ins changed
+Opt-ins changed
 + uptime-kuma (service): 30 4 * * * Europe/Copenhagen, via task
 ~ rejseliv.app: schedule */5 * * * * -> daily
 - old-app (application): no longer opted in
@@ -229,19 +229,19 @@ After each update, coolify-watchtower keeps an eye on the service's status in Co
 Self-healing sends a message when it restarts something, when a service recovers, and when it gives up:
 
 ```text
-coolify-watchtower: ⚠ immich unhealthy, restarting
+⚠ immich unhealthy, restarting
 Coolify status: running:unhealthy for 5 min
 Restarting immich-server (attempt 1 of 2).
 ```
 
 ```text
-coolify-watchtower: ⚠ uptime-kuma looks unhealthy after the update
+⚠ uptime-kuma looks unhealthy after the update
 Coolify status after 10 min: running:unhealthy
 louislam/uptime-kuma:2 2.5.4 -> 2.5.5
 ```
 
-- **Discord:** create a webhook in the channel (**Channel settings → Integrations → Webhooks**) and use its URL. Coolify's API can't post to the Discord channel you set up inside Coolify, so coolify-watchtower needs its own webhook.
-- **ntfy:** use the topic URL, e.g. `https://ntfy.sh/my-topic`.
+- **Discord:** create a webhook in the channel (**Channel settings → Integrations → Webhooks**) and use its URL. Coolify's API can't post to the Discord channel you set up inside Coolify, so coolify-watchtower needs its own webhook. Messages arrive as embeds with a coloured bar: blue for info, green when something worked, orange for warnings, red for failures and purple for opt-in changes.
+- **ntfy:** use the topic URL, e.g. `https://ntfy.sh/my-topic`. The title arrives as `coolify-watchtower: <title>`.
 - **Anything else:** coolify-watchtower sends a plain-text POST with the title in a `Title` header.
 
 <!-- screenshot: a Discord notification -->
