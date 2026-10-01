@@ -294,9 +294,9 @@ assert u.leftover_warnings() == []
 sent = []; orig_notify = u.notify; u.notify = lambda title, body: sent.append(title)
 T0 = datetime(2026, 10, 1, 0, 0, tzinfo=u.zone("UTC"))
 cfg = {"name": "testbed", "kind": "service", "healthcheck": True}
-def at(minute, status, starting, st, f):
+def at(minute, status, docker, st, f):
     u.STATUSES.clear(); u.STATUSES["tb"] = status
-    u.STARTING.clear(); u.STARTING.update({"tb"} if starting else set())
+    u.DOCKER_HEALTH.clear(); u.DOCKER_HEALTH["tb"] = {True: "starting", False: "ok"}.get(docker, docker)
     u.DISCOVERY_COMPLETE = True; all_restarts.clear()
     f(T0 + timedelta(minutes=minute), st)
 # post-update check: "healthy" while starting must not count
@@ -314,14 +314,25 @@ for m in range(0, 5):
     at(m, "running:unhealthy", False, st, heal)                    # 5 bad minutes -> restart 1
 for m in range(5, 8):
     at(m, "running:healthy", True, st, heal)                       # restarted: starting, "healthy"
-for m in range(8, 25):
+for m in range(8, 11):
+    at(m, "running:healthy", "unhealthy", st, heal)                # Docker: unhealthy, Coolify still stale "healthy"
+for m in range(11, 25):
     at(m, "running:unhealthy", False, st, heal)                    # still broken -> restart 2 after 15 min
 for m in range(25, 28):
     at(m, "running:healthy", True, st, heal)
-for m in range(28, 45):
+for m in range(28, 31):
+    at(m, "running:healthy", "unhealthy", st, heal)
+for m in range(31, 45):
     at(m, "running:unhealthy", False, st, heal)
 assert not any("recovered" in x for x in sent), sent
 assert sum("restarting" in x for x in sent) == 2 and any("still unhealthy after 2 restarts" in x for x in sent), sent
 u.notify = orig_notify
+# Docker health from the container list
+dh = u.docker_health([{"Names": ["/web-x1"], "Status": "Up 3 minutes (healthy)"},
+                      {"Names": ["/worker-x1"], "Status": "Up 3 minutes (unhealthy)"},
+                      {"Names": ["/web-x2"], "Status": "Up 9 seconds (health: starting)"},
+                      {"Names": ["/worker-x2"], "Status": "Up 9 seconds (unhealthy)"},
+                      {"Names": ["/app-x3"], "Status": "Up 2 hours"}], {"x1", "x2", "x3"})
+assert dh == {"x1": "unhealthy", "x2": "starting", "x3": "ok"}, dh
 print("apps:", u.discover_unsupported_apps())
 print("harness ok")

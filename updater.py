@@ -28,7 +28,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.8.7"
+VERSION = "1.8.8"
 
 
 def env_bool(name, default):
@@ -269,10 +269,32 @@ def set_log_tz(tzs):
 # and the resources whose server Coolify can't reach (their status is stale then).
 STATUSES = {}
 SERVER_DOWN = set()
-# Resources with a container still in its health-check start period. Coolify reports those as
-# "running:healthy" (it turns the container status "running:starting" into healthy), so its status
-# can't be trusted until Docker's own health status has left "starting".
-STARTING = set()
+# Docker's own health per resource, from the container list's Status ("(healthy)", "(unhealthy)",
+# "(health: starting)"): "starting" if any container is starting, else "unhealthy" if any is
+# unhealthy, else "ok". It's current, unlike Coolify's stored status, which lags behind and also
+# reports a container in its start period ("running:starting") as "running:healthy".
+DOCKER_HEALTH = {}
+
+
+def docker_health(containers, uuids):
+    health = {}
+    for c in containers:
+        uuid = owner_uuid(c, uuids)
+        if not uuid:
+            continue
+        text = c.get("Status") or ""
+        state = "starting" if "health: starting" in text else ("unhealthy" if "(unhealthy)" in text else "ok")
+        rank = {"ok": 0, "unhealthy": 1, "starting": 2}
+        if rank[state] > rank[health.get(uuid, "ok")]:
+            health[uuid] = state
+        else:
+            health.setdefault(uuid, "ok")
+    return health
+
+
+def resource_ok(uuid):
+    """Healthy by both Coolify's status and Docker's current health."""
+    return status_ok(STATUSES.get(uuid, "")) and DOCKER_HEALTH.get(uuid, "ok") == "ok"
 
 # False when the last discover() missed data (a failed API or Docker call), so its result
 # mustn't be compared with earlier ones: a failed call would look like services disappearing.
@@ -417,9 +439,8 @@ def discover():
     STATUSES.update(statuses)
     SERVER_DOWN.clear()
     SERVER_DOWN.update(down)
-    STARTING.clear()
-    STARTING.update(u for u in (owner_uuid(c, names) for c in containers
-                                if "health: starting" in (c.get("Status") or "")) if u)
+    DOCKER_HEALTH.clear()
+    DOCKER_HEALTH.update(docker_health(containers, names))
     DISCOVERY_COMPLETE = complete
     return found, sorted(ignored)
 
@@ -780,7 +801,7 @@ def follow_up_updates(now, state):
         if elapsed < HEALTH_GRACE:
             continue
         status = STATUSES.get(uuid, "")
-        p["ok"] = p.get("ok", 0) + 1 if status_ok(status) and uuid not in STARTING else 0
+        p["ok"] = p.get("ok", 0) + 1 if resource_ok(uuid) else 0
         p["last"] = status or "not found"
         if p["ok"] >= 2:
             note = " (no health check, so only running is known)" if "unknown" in status else ""
@@ -863,13 +884,16 @@ def heal(found, now, state):
     for uuid, cfg in watched.items():
         status = STATUSES.get(uuid, "")
         inc = incidents.setdefault(uuid, {"bad": 0, "ok": 0, "restarts": 0, "last": None, "gave_up": False})
-        if uuid in STARTING:
-            inc["bad"] = inc["ok"] = 0  # still starting: Coolify's "healthy" can't be trusted yet
-        elif status_broken(status):
+        docker = DOCKER_HEALTH.get(uuid, "ok")
+        if docker == "starting":
+            inc["bad"] = inc["ok"] = 0  # still starting: neither healthy nor broken yet
+        elif status_broken(status) or docker == "unhealthy":
+            if docker == "unhealthy" and not status_broken(status):
+                status = "running:unhealthy"  # Docker already knows; Coolify hasn't caught up
             inc["bad"] += 1
             inc["ok"] = 0
             inc["status"] = status
-        elif status_ok(status):
+        elif resource_ok(uuid):
             inc["bad"] = 0
             inc["ok"] += 1
             if inc["ok"] >= 2 and (inc["restarts"] or inc["gave_up"]):
