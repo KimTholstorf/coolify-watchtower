@@ -289,5 +289,39 @@ os.environ["TASK_NAME"] = "auto-update"
 assert any("TASK_NAME=auto-update looks like a leftover" in w for w in u.leftover_warnings())
 del os.environ["TASK_NAME"]
 assert u.leftover_warnings() == []
+# Regression (seen on a real server): during the health-check start period Coolify reports
+# "running:healthy", which gave a false "healthy after the update" and false "recovered" resets.
+sent = []; orig_notify = u.notify; u.notify = lambda title, body: sent.append(title)
+T0 = datetime(2026, 10, 1, 0, 0, tzinfo=u.zone("UTC"))
+cfg = {"name": "testbed", "kind": "service", "healthcheck": True}
+def at(minute, status, starting, st, f):
+    u.STATUSES.clear(); u.STATUSES["tb"] = status
+    u.STARTING.clear(); u.STARTING.update({"tb"} if starting else set())
+    u.DISCOVERY_COMPLETE = True; all_restarts.clear()
+    f(T0 + timedelta(minutes=minute), st)
+# post-update check: "healthy" while starting must not count
+st = {}; u.watch_update("tb", cfg, "testbed 1.0.2 -> 1.0.3", T0, st)
+for m in range(0, 3):
+    at(m, "running:healthy", True, st, u.follow_up_updates)       # start period: looks healthy, isn't trusted
+assert not any("healthy after the update" in x for x in sent), sent
+for m in range(3, 11):
+    at(m, "running:unhealthy", False, st, u.follow_up_updates)
+assert any("looks unhealthy after the update" in x for x in sent), sent
+# self-healing: a restart followed by a start period must not count as "recovered"
+sent.clear(); st = {}; hf = {"tb": dict(cfg, enabled=True, source="task", frequency="daily", timezone="UTC")}
+heal = lambda now, state: u.heal(hf, now, state)
+for m in range(0, 5):
+    at(m, "running:unhealthy", False, st, heal)                    # 5 bad minutes -> restart 1
+for m in range(5, 8):
+    at(m, "running:healthy", True, st, heal)                       # restarted: starting, "healthy"
+for m in range(8, 25):
+    at(m, "running:unhealthy", False, st, heal)                    # still broken -> restart 2 after 15 min
+for m in range(25, 28):
+    at(m, "running:healthy", True, st, heal)
+for m in range(28, 45):
+    at(m, "running:unhealthy", False, st, heal)
+assert not any("recovered" in x for x in sent), sent
+assert sum("restarting" in x for x in sent) == 2 and any("still unhealthy after 2 restarts" in x for x in sent), sent
+u.notify = orig_notify
 print("apps:", u.discover_unsupported_apps())
 print("harness ok")

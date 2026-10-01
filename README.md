@@ -159,7 +159,7 @@ Self-healing follows these rules:
 | It restarts without pulling new images | healing never turns into an unplanned update |
 | At most 2 restarts per incident, 15 minutes apart | a crash loop gets reported to you instead |
 | 3 or more services unhealthy at once: no restarts, just a warning | that usually means the server itself has a problem |
-| Never while an update is being checked, a deployment is running, or Coolify can't reach the server | the status can't be trusted then |
+| Never while an update is being checked, a deployment is running, a container is still starting, or Coolify can't reach the server | the status can't be trusted then. Coolify shows a container in its health check's start period as healthy |
 
 Both are on by default. To turn them off for one service, for example one whose status in Coolify is never green:
 

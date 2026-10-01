@@ -28,7 +28,7 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
-VERSION = "1.8.6"
+VERSION = "1.8.7"
 
 
 def env_bool(name, default):
@@ -269,6 +269,10 @@ def set_log_tz(tzs):
 # and the resources whose server Coolify can't reach (their status is stale then).
 STATUSES = {}
 SERVER_DOWN = set()
+# Resources with a container still in its health-check start period. Coolify reports those as
+# "running:healthy" (it turns the container status "running:starting" into healthy), so its status
+# can't be trusted until Docker's own health status has left "starting".
+STARTING = set()
 
 # False when the last discover() missed data (a failed API or Docker call), so its result
 # mustn't be compared with earlier ones: a failed call would look like services disappearing.
@@ -413,6 +417,9 @@ def discover():
     STATUSES.update(statuses)
     SERVER_DOWN.clear()
     SERVER_DOWN.update(down)
+    STARTING.clear()
+    STARTING.update(u for u in (owner_uuid(c, names) for c in containers
+                                if "health: starting" in (c.get("Status") or "")) if u)
     DISCOVERY_COMPLETE = complete
     return found, sorted(ignored)
 
@@ -765,13 +772,15 @@ def follow_up_updates(now, state):
     """After an update, watch the resource's Coolify status and report once: healthy (running and not
     unhealthy in two checks in a row, after a grace period so the pre-restart status isn't trusted),
     or unhealthy when HEALTH_TIMEOUT passes without that."""
+    if not DISCOVERY_COMPLETE:
+        return  # no container list, so a starting container could look healthy
     pending = state.setdefault("pending", {})
     for uuid, p in list(pending.items()):
         elapsed = (now - p["since"]).total_seconds()
         if elapsed < HEALTH_GRACE:
             continue
         status = STATUSES.get(uuid, "")
-        p["ok"] = p.get("ok", 0) + 1 if status_ok(status) else 0
+        p["ok"] = p.get("ok", 0) + 1 if status_ok(status) and uuid not in STARTING else 0
         p["last"] = status or "not found"
         if p["ok"] >= 2:
             note = " (no health check, so only running is known)" if "unknown" in status else ""
@@ -854,7 +863,9 @@ def heal(found, now, state):
     for uuid, cfg in watched.items():
         status = STATUSES.get(uuid, "")
         inc = incidents.setdefault(uuid, {"bad": 0, "ok": 0, "restarts": 0, "last": None, "gave_up": False})
-        if status_broken(status):
+        if uuid in STARTING:
+            inc["bad"] = inc["ok"] = 0  # still starting: Coolify's "healthy" can't be trusted yet
+        elif status_broken(status):
             inc["bad"] += 1
             inc["ok"] = 0
             inc["status"] = status
